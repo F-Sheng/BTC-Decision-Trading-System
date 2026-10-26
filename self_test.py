@@ -44,7 +44,7 @@ def main():
 
     step(2, "市价卖出 1 张（最小单位）")
     try:
-        r = c.place_order(INST, "sell", "1", ord_type="market",
+        r = c.place_order(INST, "sell", "1", ord_type="market", pos_side="short",
                           cl_ord_id=f"ST{int(time.time())%1000000}")
         print("   ordId =", r.get("ordId"), " sCode =", r.get("sCode"), r.get("sMsg"))
     except OkxError as e:
@@ -53,8 +53,8 @@ def main():
     time.sleep(1.5)
 
     step(3, "校验持仓变化 +1 张")
-    p = c.position(INST)
-    now = float(p["pos"]) if p else 0.0
+    p = c.position(INST, pos_side="short")
+    now = abs(float(p["pos"])) if p else 0.0
     print(f"   现在净持仓 {now}（起始 {start}，变化 {now-start:+.2f}）")
     if abs((now - start) + 1) > 1e-6:
         print("   ⚠ 持仓变化与预期不符")
@@ -65,7 +65,7 @@ def main():
     px = float(p["avgPx"])
     algo_id = ""
     try:
-        a = c.place_algo_stop(INST, "buy", "1", px * 1.05,
+        a = c.place_algo_stop(INST, "buy", "1", px * 1.05, pos_side="short",
                               cl_ord_id=f"STSL{int(time.time())%1000000}")
         algo_id = a.get("algoId", "")
         print("   algoId =", algo_id)
@@ -92,7 +92,8 @@ def main():
 
     step(7, "买回 1 张，恢复原始持仓")
     try:
-        r = c.place_order(INST, "buy", "1", ord_type="market",
+        r = c.place_order(INST, "buy", "1", ord_type="market", pos_side="short",
+                          reduce_only=True,
                           cl_ord_id=f"STC{int(time.time())%1000000}")
         print("   ordId =", r.get("ordId"))
     except OkxError as e:
