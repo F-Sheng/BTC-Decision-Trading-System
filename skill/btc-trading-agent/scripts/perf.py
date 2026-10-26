@@ -63,6 +63,10 @@ def main():
 
     # 健康
     logf = LOG_DIR / f"btc-{now.strftime('%Y%m%d')}.log"
+    if not logf.exists():
+        # 跨零点后当天日志还没建，回退到最近一个日志文件
+        cands = sorted(LOG_DIR.glob("btc-*.log"))
+        logf = cands[-1] if cands else logf
     lag = (time.time() - logf.stat().st_mtime) if logf.exists() else -1
 
     L = []
