@@ -1,4 +1,4 @@
-"""运行成绩单：检验策略 V2 的实际表现。
+"""运行成绩单：检验策略的实际表现（版本号读 config）。
 
 用法：
     python perf.py           # 打印
@@ -33,7 +33,7 @@ def main():
     rows = con.execute("SELECT ts, equity FROM equity WHERE ts>=? ORDER BY ts",
                        (t0,)).fetchall()
     if not rows:
-        # V2 刚起步，还没有新的权益记录：用最新一条作为当前值
+        # 刚起步，还没有新的权益记录：用最新一条作为当前值
         rows = con.execute(
             "SELECT ts, equity FROM equity ORDER BY ts DESC LIMIT 1").fetchall()
     eq_now = rows[-1][1] if rows else 0
@@ -72,7 +72,8 @@ def main():
     L = []
     A = L.append
     A("=" * 62)
-    A("  BTC 自动交易策略 V2 · 运行成绩单")
+    _ver = cfg.get("strategy_version", "V3")
+    A(f"  BTC 自动交易策略 {_ver} · 运行成绩单")
     A("=" * 62)
     A(f"  统计时间     {now.strftime('%Y-%m-%d %H:%M:%S')} 北京时间")
     A(f"  运行时长     {run_h:.1f} 小时（约 {run_h/24:.1f} 天）")

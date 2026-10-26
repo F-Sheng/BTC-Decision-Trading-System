@@ -50,7 +50,7 @@
   "v1_start_equity": 87393.0,
   "counter_size_floor": 0.33,
   "account_risk_target": 0.05,
-  "strategy_version": "V2",
-  "run_started_at": 1793030338186,
-  "run_start_equity": 86589.56
+  "strategy_version": "V3",
+  "run_started_at": 1793034476691,
+  "run_start_equity": 84478.2
 }
