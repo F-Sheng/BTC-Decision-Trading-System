@@ -3,7 +3,7 @@
   "inst_id": "BTC-USDT-SWAP",
   "simulated": true,
   "leverage": 10,
-  "stop_pct_min": 0.012,
+  "stop_pct_min": 0.0155,
   "stop_pct_max": 0.02,
   "margin_pct": 0.33,
   "max_positions": 2,
