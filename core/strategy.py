@@ -228,6 +228,10 @@ def model_a(sc: ScoreCard, v15: TimeframeView, res: list[Level],
             continue
         if price > lv.price * 1.002:      # 已明显突破，不是回抽
             continue
+        # 关键：这根 K 线的最高价必须真的触到阻力位，否则只是"在阻力下方收阴"，
+        # 不构成"阻力位被拒绝"。缺这条会把任意一根小阴线当成拒绝形态。
+        if float(row["high"]) < lv.price * 0.9995:
+            continue
         reject = sh.long_upper or eng == "bear" or (not sh.is_bull and sh.close_pos < 0.45)
         if not reject:
             continue
@@ -269,6 +273,9 @@ def model_b(sc: ScoreCard, v15: TimeframeView, sup: list[Level],
         if not _near(price, lv.price, NEAR_TOL):
             continue
         if price < lv.price * 0.998:
+            continue
+        # 镜像检查：K 线最低价必须真的触到支撑位
+        if float(row["low"]) > lv.price * 1.0005:
             continue
         reject = sh.long_lower or eng == "bull" or (sh.is_bull and sh.close_pos > 0.55)
         if not reject:

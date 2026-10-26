@@ -30,6 +30,20 @@ FOMC_2026 = [
     "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
     "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
 ]
+# 政治/监管类事件：对加密与 AI 板块的方向性影响比单次 FOMC 更大
+POLITICAL_2026 = [
+    # 美国中期选举：众议院 435 席 + 参议院 35 席改选
+    # 影响链条：国会归属 → CLARITY 法案等加密立法推进速度 → 板块估值
+    #   共和党保住两院 → 政策连续、立法顺畅 → 利好
+    #   民主党夺回众议院 → 立法僵局 → 利空
+    {"name": "美国中期选举", "date": "2026-11-03", "impact": "high",
+     "note": "众议院435席+参议院35席改选；共和党保两院=政策连续，国会分治=立法僵局"},
+    # 中期选举后的跛脚鸭会期，加密立法若未过会归零
+    {"name": "跛脚鸭会期开始", "date": "2026-11-09", "impact": "mid",
+     "note": "选举后至新国会就任，未通过的加密法案窗口关闭"},
+    # CPI
+]
+
 # 2026 年 CPI 发布日（BLS 通常 8:30 ET；可在 config 覆盖）
 CPI_2026 = [
     "2026-01-13", "2026-02-11", "2026-03-11", "2026-04-10", "2026-05-12",
@@ -74,6 +88,11 @@ def next_events(cfg: dict | None = None, horizon: int = 14) -> list[dict]:
         k = _days_until(d)
         if -1 <= k <= horizon:
             out.append({"name": "美国 CPI", "date": d, "days": k, "impact": "high"})
+    for ev in POLITICAL_2026:
+        k = _days_until(ev["date"])
+        if -1 <= k <= horizon:
+            out.append({"name": ev["name"], "date": ev["date"], "days": k,
+                        "impact": ev["impact"], "note": ev.get("note", "")})
 
     # 期权到期：每周五 08:00 UTC；月末周五为月度大到期
     today = datetime.now(CST)

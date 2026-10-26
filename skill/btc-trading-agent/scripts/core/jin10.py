@@ -9,10 +9,12 @@ import json
 import re
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 
 from .utils import ROOT, read_json, write_json
 
+CST = timezone(timedelta(hours=8))
 CACHE = ROOT / "state" / "jin10.json"
 TTL = 300
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -39,6 +41,7 @@ class Flash:
     mid: int = 0
     score: int = 0
     updated: int = 0
+    total_raw: int = 0       # 接口实际返回多少条（用于判断数据是否够新）
 
     def summary(self, n: int = 5) -> str:
         if not self.lst:
@@ -69,22 +72,39 @@ def fetch(force: bool = False) -> Flash:
         d = {}
 
     pos_n = neg_n = 0
-    for it in (d.get("data") or [])[:200]:
+    items = (d.get("data") or [])[:200]
+    out.total_raw = len(items)
+
+    for it in items:
         dd = it.get("data") or {}
         txt = _clean(str(dd.get("content") or dd.get("title") or ""))
+        # VIP 锁定的条目 content 为空，跳过
         if not txt or len(txt) < 8:
             continue
+
+        # 金十的 time 是字符串 "2026-10-27 00:38:38"，不是毫秒时间戳
+        raw_t = it.get("time")
+        ts_str, hhmm = "", ""
+        try:
+            if isinstance(raw_t, str) and len(raw_t) >= 16:
+                ts_str = raw_t
+                hhmm = raw_t[11:16]
+            elif raw_t:
+                dt = datetime.fromtimestamp(int(raw_t) / 1000, CST)
+                ts_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                hhmm = dt.strftime("%H:%M")
+        except Exception:
+            ts_str, hhmm = str(raw_t or ""), str(raw_t or "")[-8:-3]
+
         low = txt.lower()
-        level = 2 if any(k in low for k in KW_HIGH) else (
+        # important 字段是官方重要度标记，优先采信
+        official = int(it.get("important") or 0) == 1
+        level = 2 if (official or any(k in low for k in KW_HIGH)) else (
             1 if any(k in low for k in KW_MID) else 0)
         if level == 0:
             continue
-        t = ""
-        try:
-            t = time.strftime("%H:%M", time.localtime(int(it.get("time") or 0)))
-        except Exception:
-            t = str(it.get("time") or "")[-8:-3]
-        out.lst.append({"time": t, "text": txt[:120], "level": level})
+
+        out.lst.append({"time": hhmm, "ts": ts_str, "text": txt[:120], "level": level})
         if level == 2:
             out.high += 1
         else:
@@ -98,7 +118,8 @@ def fetch(force: bool = False) -> Flash:
 
     write_json(CACHE, {"_t": time.time(), "d": {
         "lst": out.lst, "high": out.high, "mid": out.mid,
-        "score": out.score, "updated": out.updated}})
+        "score": out.score, "updated": out.updated,
+        "total_raw": out.total_raw}})
     return out
 
 
