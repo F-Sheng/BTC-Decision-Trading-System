@@ -247,12 +247,25 @@ def model_a(sc: ScoreCard, v15: TimeframeView, res: list[Level],
         conf = 0.45 + (0.15 if sh.long_upper else 0) + (0.1 if eng == "bear" else 0) \
             + (0.1 if lv.weight >= 1.2 else 0) \
             + (0.05 if vr >= 1.5 else (-0.05 if vr < 1.0 else 0))
+        # 指标共振：RSI 超买 / MACD 动能转弱 / 触及布林上轨 —— 每条加分，不改变触发条件
+        ind = 0.0
+        notes = [f"触及{lv}", f"上影={sh.upper_wick:.0f}",
+                 f"收于区间{sh.close_pos:.0%}", f"量比{vr:.2f}"]
+        if v15.rsi >= 65:
+            ind += 0.08
+            notes.append(f"RSI{v15.rsi:.0f}超买")
+        if v15.macd_hist < v15.macd_hist_prev:
+            ind += 0.05
+            notes.append("MACD柱转弱")
+        if v15.bb_up > 0 and abs(price - v15.bb_up) / price <= 0.003:
+            ind += 0.05
+            notes.append("触及布林上轨")
+        conf += ind
         return Signal(
             side="short", model="A", entry=round(price, 1),
             stop=round(stop_struct, 1), targets=[],
             confidence=min(conf, 0.9), size_mult=size_mult, vol_ratio=vr,
-            reasons=[f"触及{lv}", f"上影={sh.upper_wick:.0f}", f"收于区间{sh.close_pos:.0%}",
-                     f"量比{vr:.2f}"],
+            reasons=notes,
             structure=max((stop_struct - price) / price, 0.005),
         )
     return None
@@ -290,12 +303,25 @@ def model_b(sc: ScoreCard, v15: TimeframeView, sup: list[Level],
         conf = 0.45 + (0.15 if sh.long_lower else 0) + (0.1 if eng == "bull" else 0) \
             + (0.1 if lv.weight >= 1.2 else 0) \
             + (0.05 if vr >= 1.5 else (-0.05 if vr < 1.0 else 0))
+        # 指标共振（做多的镜像）：RSI 超卖 / MACD 动能转强 / 触及布林下轨
+        ind = 0.0
+        notes = [f"触及{lv}", f"下影={sh.lower_wick:.0f}",
+                 f"收于区间{sh.close_pos:.0%}", f"量比{vr:.2f}"]
+        if v15.rsi <= 35:
+            ind += 0.08
+            notes.append(f"RSI{v15.rsi:.0f}超卖")
+        if v15.macd_hist > v15.macd_hist_prev:
+            ind += 0.05
+            notes.append("MACD柱转强")
+        if v15.bb_low > 0 and abs(price - v15.bb_low) / price <= 0.003:
+            ind += 0.05
+            notes.append("触及布林下轨")
+        conf += ind
         return Signal(
             side="long", model="B", entry=round(price, 1),
             stop=round(stop_struct, 1), targets=[],
             confidence=min(conf, 0.9), size_mult=size_mult, vol_ratio=vr,
-            reasons=[f"触及{lv}", f"下影={sh.lower_wick:.0f}", f"收于区间{sh.close_pos:.0%}",
-                     f"量比{vr:.2f}"],
+            reasons=notes,
             structure=max((price - stop_struct) / price, 0.005),
         )
     return None

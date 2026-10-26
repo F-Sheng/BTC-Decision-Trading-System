@@ -159,6 +159,25 @@ def build(dfs: dict, price: float, swing_fn=None,
             for _, p in lows[-4:]:
                 out.append(TechLevel(float(p), "swing", f"{name}摆动低", w))
 
+    # ---- 4. 布林带（动态压力/支撑）----
+    # 布林轨道是价格的自然边界：上轨=短期超买边界，下轨=超卖边界，中轨=均值回归目标。
+    # 之前认为"布林是波动率指标不能当阻力"是错的——它恰恰是最常用的动态阻力。
+    for name, df, w in (("15m", dfs.get("15m"), 1.15),
+                        ("1h", h1, 1.20),
+                        ("4h", h4, 1.20)):
+        if df is None or len(df) < 25:
+            continue
+        cl = df["close"]
+        mid = cl.rolling(20).mean()
+        sd = cl.rolling(20).std(ddof=0)
+        ub, lb, md = float((mid + 2 * sd).iloc[-1]), float((mid - 2 * sd).iloc[-1]), float(mid.iloc[-1])
+        if ub > 0:
+            out.append(TechLevel(ub, "boll", f"{name}布林上轨", w))
+        if lb > 0:
+            out.append(TechLevel(lb, "boll", f"{name}布林下轨", w))
+        if md > 0:
+            out.append(TechLevel(md, "boll", f"{name}布林中轨", round(w * 0.85, 2)))
+
     res = [x for x in out if x.price > price * 1.0005]
     sup = [x for x in out if x.price < price * 0.9995]
     return res, sup
