@@ -52,5 +52,6 @@
   "account_risk_target": 0.05,
   "strategy_version": "V3",
   "run_started_at": 1793034476691,
-  "run_start_equity": 84478.2
+  "run_start_equity": 84478.2,
+  "touch_tol_usd": 100.0
 }

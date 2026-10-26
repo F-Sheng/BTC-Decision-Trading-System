@@ -14,6 +14,14 @@ from .market import TimeframeView, shape, engulfing
 from .scoring import ScoreCard
 from . import market
 
+def _touch_tol(cfg: dict | None) -> float:
+    """K 线是否'触到'关键位的容差（美元绝对值）。默认 100 点。"""
+    try:
+        return float((cfg or {}).get("touch_tol_usd", 100.0))
+    except Exception:
+        return 100.0
+
+
 NEAR_TOL = 0.005   # 价格与关键位的最大容许距离（0.5%）；原 0.3% 过紧，几乎不触发
 
 
@@ -228,9 +236,10 @@ def model_a(sc: ScoreCard, v15: TimeframeView, res: list[Level],
             continue
         if price > lv.price * 1.002:      # 已明显突破，不是回抽
             continue
-        # 关键：这根 K 线的最高价必须真的触到阻力位，否则只是"在阻力下方收阴"，
-        # 不构成"阻力位被拒绝"。缺这条会把任意一根小阴线当成拒绝形态。
-        if float(row["high"]) < lv.price * 0.9995:
+        # 关键：这根 K 线的最高价必须触到阻力位附近，否则只是"在阻力下方收阴"，
+        # 不构成"阻力位被拒绝"。容差用美元绝对值（BTC 上 100 点以内的偏差算触碰），
+        # 比按百分比更贴合实战：8 万时 0.125%、16 万时 0.0625%，用户指定 100 点。
+        if float(row["high"]) < lv.price - _touch_tol(cfg):
             continue
         reject = sh.long_upper or eng == "bear" or (not sh.is_bull and sh.close_pos < 0.45)
         if not reject:
@@ -287,8 +296,8 @@ def model_b(sc: ScoreCard, v15: TimeframeView, sup: list[Level],
             continue
         if price < lv.price * 0.998:
             continue
-        # 镜像检查：K 线最低价必须真的触到支撑位
-        if float(row["low"]) > lv.price * 1.0005:
+        # 镜像检查：K 线最低价必须触到支撑位附近（同样 100 点容差）
+        if float(row["low"]) > lv.price + _touch_tol(cfg):
             continue
         reject = sh.long_lower or eng == "bull" or (sh.is_bull and sh.close_pos > 0.55)
         if not reject:
