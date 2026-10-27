@@ -335,3 +335,89 @@ cd "D:\DP workspace\btc_system"
 - 更根本的办法：能被规则写死的判断就写进 `run.py`，不要消耗 Agent
 
 **分工原则：机器人做能自动化的，Agent 只做它做不到的。**
+
+---
+
+## 17. 【待实施】本地取数架构（用户 10-27 晚决定的方向）
+
+### 问题诊断
+当前架构的缺陷：**Agent 直接截图 → 图片永久留在对话转录里**。
+今天截了 229 张图（每张约 1,500 token ≈ 34 万 token），每轮都要重发一遍，
+这是 token 消耗的真正主因（占 90%+）。
+
+### 正确架构
+```
+本地层（零 Agent token，图片永不进 Agent 上下文）
+  btc_system/local_fetch.py
+   · 每 30 分钟：连 CDP 127.0.0.1:37086 → 截图（4-5 张）
+   · 调本地 Qwen2.5-VL-3B 读图（不用 OCR，OCR 对图表读数不准）
+   · 追加一行到 data/market_snapshot.jsonl
+   · 图片归档到 data/snapshots/，不传 Agent
+   · 异常（抓取失败 / 距止损<0.5% / R 突变>50%）写 flag
+
+Agent 层（每轮只读约 540 token 文本）
+  · 读 market_snapshot.jsonl 最后 8 行（趋势）
+  · 判断方向/仓位
+  · 输出 2-3 行
+```
+
+### 数据契约 data/market_snapshot.jsonl（已在 18:15 开始记录）
+```json
+{"ts":"2026-10-27T18:15","px":79530,"r":0.49,
+ "up_px":80543,"up_short_m":116.88,"dn_px":79003,"dn_long_m":238.17,
+ "whale_long_pct":39.76,"smart":"Extremely Bearish","liq24h_m":135.02,
+ "vol24h_b":151.80,"pos":{"side":"short","entry":80240.7,"size":338.1,
+ "sl":81493.8,"tp1":79168,"upl_pct":0.89}}
+```
+每行约 113 token。
+
+### 硬件实测
+```
+CPU    i5-12400F (6C/12T)
+内存   16GB 总 / 6.9GB 可用    <- 最紧
+显卡   RTX 3050 8GB (8192MiB, 算力 8.6, CUDA 13.4)   <- 够用
+磁盘   E: 149GB 可用            <- 模型放这里
+```
+**推荐模型：Qwen2.5-VL-3B-Instruct Q4_K_M（约 2.3GB 显存）**
+- 备选：InternVL3-2B（1.5GB，更快）
+- 不要用 Qwen2.5-VL-7B（5.5GB，内存不够易 OOM）
+
+部署：
+```powershell
+$env:OLLAMA_MODELS="E:\ollama-models"
+ollama pull qwen2.5vl:3b     # 约 3.2GB
+```
+
+### 为什么不用 OCR
+工具提示浮在 K 线图上、半透明、有重叠 -> 传统 OCR（RapidOCR/PaddleOCR）读数不准。
+必须用 VLM 做语义读图。用户明确指出过这一点。
+
+### 为什么判断不能交给脚本
+脚本能把阈值写死（R>1 就怎样），但写不出这种判断：
+「下方 248M 多头是空头燃料，但上方空头只有 93M，意味着反弹时没有空头爆仓推动力」。
+**感知可以外包给本地模型，判断必须 Agent 做。**
+
+### 实施顺序
+1. 装 Ollama + Qwen2.5-VL-3B
+2. 用 data/snapshots/ 里已存的真实截图测识别准确率（不花钱）
+3. 准了 -> 写 local_fetch.py
+4. 把 30 分钟定时任务改成「读 JSONL + 判断」，不再调浏览器截图工具
+5. 每 12 小时滚动一次会话
+
+### 预期效果
+| | 现在 | 改造后 |
+|---|---|---|
+| 每轮输入 | ~150,000 token | ~6,000 token |
+| 48 轮/天 | ~720 万 | ~29 万 |
+| 节省 | | **96%** |
+
+### 关键认知（用户纠正的）
+- 错：降频到 4 小时来省钱
+- 对：**贵在上下文长度，不在唤醒频率。短上下文 + 高频判断才对。**
+- 错：让脚本替代判断
+- 对：**本地模型只做眼睛（感知），Agent 做大脑（判断）**
+
+### 相关文件
+- `data/market_snapshot.jsonl`  已开始记录（每轮追加一行）
+- `tools_snapshot_append.py`    追加快照的脚本
+- `data/snapshots/`             （待建）截图归档目录
