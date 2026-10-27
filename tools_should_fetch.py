@@ -258,6 +258,38 @@ def r_liquidation_shift():
     return False, msg
 
 
+
+def r_liquidation_burst():
+    """规则 9：OKX 真实强平流（2026-10-27 新增）
+
+    用户提问：「清算地图是自己算的，不读图能拿到最新数据吗？
+              是不是可以直接读 OKX 的强平流，暴涨就切模式？」
+    答：能。OKX /api/v5/public/liquidation-orders 无需额外权限，返回真实爆仓成交。
+        原 L2[PROXY] 是基于 OI + 杠杆假设的估算，不如这个准。
+    """
+    try:
+        import subprocess
+        py = sys.executable
+        out = subprocess.run(
+            [py, str(ROOT / "tools_liq_flow.py"), "--json"],
+            capture_output=True, text=True, timeout=25,
+            encoding="utf-8", errors="ignore")
+        d = json.loads(out.stdout or "{}")
+    except Exception as e:
+        return None, "强平流获取失败: %s" % str(e)[:60]
+
+    if not d.get("ok"):
+        return None, "强平流: " + str(d.get("why"))
+
+    w60 = d.get("w60") or {}
+    ratio = d.get("short_long_ratio_60m")
+    msg = ("60分钟 空爆%.0f张/多爆%.0f张 比%s"
+           % (w60.get("short_liq", 0), w60.get("long_liq", 0), ratio))
+    if d.get("burst"):
+        return True, "强平潮！" + "; ".join(d.get("why") or []) + " | " + msg
+    return False, msg
+
+
 def main():
     reasons = []       # 触发原因
     checks = {}        # 全部检查明细
@@ -331,6 +363,13 @@ def main():
     # 8. 清算 / OI 突变（从机器人日志读，零成本）
     ok, msg = r_liquidation_shift()
     checks["liquidation"] = msg
+    if ok:
+        reasons.append(msg)
+        big_event = True
+
+    # 9. OKX 真实强平流（暴涨 -> 大事）
+    ok, msg = r_liquidation_burst()
+    checks["liq_flow"] = msg
     if ok:
         reasons.append(msg)
         big_event = True
