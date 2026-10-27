@@ -113,21 +113,25 @@ def fetch_following(verbose=True) -> list[dict]:
             st2 = json.loads(pg.eval_js(JS_STATUS) or "{}")
             print("  切换后:", json.dumps(st2, ensure_ascii=False))
 
-        # 滚动加载
-        # X 的时间线是虚拟列表，window.scrollBy 无效，必须滚它自己的容器
-        for _ in range(6):
-            pg.eval_js(r"""(() => {
-              const sc = document.scrollingElement || document.documentElement;
-              const cand = [sc, document.querySelector('main'), document.querySelector('[data-testid="primaryColumn"]')];
-              for (const el of cand) {
-                if (el && el.scrollHeight > el.clientHeight + 50) {
-                  el.scrollTop += 2000;
-                }
-              }
-              window.scrollBy(0, 2000);
-              return 1;
-            })()""")
-            time.sleep(2.2)
+        # 滚动加载 —— 2026-10-28 用户建议试模拟键盘，实测结论：
+        #   window.scrollBy / 容器 scrollTop  -> 无效（X 虚拟列表不响应）
+        #   Input mouseWheel                  -> 有效，5->12 条
+        #   Input PageDown                    -> 有效，5->11 条
+        #   滚轮 + PageDown 交替              -> 最好，5->13 条
+        for _i in range(4):
+            pg.call("Input.dispatchMouseEvent", {
+                "type": "mouseWheel", "x": 700, "y": 500,
+                "deltaX": 0, "deltaY": 1800,
+                "pointerType": "mouse", "button": "none", "buttons": 0})
+            time.sleep(1.2)
+            for _t in ("rawKeyDown", "keyUp"):
+                pg.call("Input.dispatchKeyEvent", {
+                    "type": _t, "windowsVirtualKeyCode": 34, "nativeVirtualKeyCode": 34,
+                    "key": "PageDown", "code": "PageDown"})
+            time.sleep(1.3)
+            if verbose:
+                print("    滚动 %d 轮后: %s 条" % (_i + 1,
+                      pg.eval_js("document.querySelectorAll('article').length")))
 
         raw = pg.eval_js(JS_X)
         arr = json.loads(raw) if raw else []

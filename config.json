@@ -50,9 +50,9 @@
   "v1_start_equity": 87393.0,
   "counter_size_floor": 0.33,
   "account_risk_target": 0.05,
-  "strategy_version": "V3",
-  "run_started_at": 1793034476691,
-  "run_start_equity": 84478.2,
+  "strategy_version": "V4",
+  "run_started_at": 1793127223489,
+  "run_start_equity": 82943.68,
   "touch_tol_usd": 100.0,
   "maker_enabled": true,
   "maker_wait_s": 24,
@@ -73,5 +73,13 @@
   "add_risk_cap": 1.6,
   "add_blackout_h": 1.0,
   "trail_buffer_min_r": 0.4,
-  "trail_buffer_ratio": 0.4
+  "trail_buffer_ratio": 0.4,
+  "v3_archive": {
+    "start_equity": 84478.2,
+    "started_at": 1793034476691,
+    "final_equity": 82943.68,
+    "pnl": -1534.52,
+    "pnl_pct": -1.82,
+    "note": "V3 于 2026-10-28 02:55 结束，切换 V4"
+  }
 }
