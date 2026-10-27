@@ -421,3 +421,221 @@ ollama pull qwen2.5vl:3b     # 约 3.2GB
 - `data/market_snapshot.jsonl`  已开始记录（每轮追加一行）
 - `tools_snapshot_append.py`    追加快照的脚本
 - `data/snapshots/`             （待建）截图归档目录
+
+---
+
+## 18. 【已完成】Ollama + Qwen2.5-VL-3B 本地部署与验证（2026-10-27 18:35）
+
+### 安装位置（全部在 E 盘，C 盘零负担）
+```
+E:\btc-ai\ollama          3,136 MB   Ollama 程序本体（v0.40.11）
+E:\btc-ai\models          3,052 MB   模型权重（qwen2.5vl:3b）
+E:\btc-ai\tmp                 0 MB   临时目录（OLLAMA_TMPDIR）
+E:\btc-ai\downloads       1,585 MB   安装包（可删，省 1.6GB）
+E:\btc-ai\logs                      测试结果
+E:\btc-ai\test-images               历史基准图（带已知答案）
+E:\btc-ai\snapshots\1815            18:15 现场取数截图
+E:\btc-ai\vl_coin.py                 生产版读取器
+```
+**C 盘只被占用了 2.4 MB（`C:\Users\81559\.ollama` 的软链记录），可用空间仍 20.2 GB。**
+
+已设置的持久化环境变量（用户级）：
+```
+OLLAMA_MODELS = E:\btc-ai\models
+OLLAMA_TMPDIR = E:\btc-ai\tmp
+```
+**注意：新开的 PowerShell 进程需要手动补 PATH：`$env:PATH = "E:\btc-ai\ollama;$env:PATH"`**
+
+### 模型
+```
+NAME            ID              SIZE    显存占用
+qwen2.5vl:3b    fb90415cde1e    3.2 GB  ~2.3 GB
+```
+
+### 安装踩坑记录
+| 问题 | 原因 | 解决 |
+|---|---|---|
+| `Invoke-WebRequest` 下载崩溃 | 报 "Insufficient memory"，该命令把整个文件读进内存 | 改用 `curl.exe -L -o` 流式下载 |
+| github.com 不通 | 网络限制 | ollama.com 的 307 重定向最终指向 release-assets.githubusercontent.com，**可以连通** |
+| 非管理员安装 | 当前 shell 非 admin | Inno Setup 的 `/DIR=` + `/VERYSILENT` 参数**不需要管理员**也能装到自定义路径 |
+
+### 验证结果（3 张历史图 + 1 轮现场新数据）
+
+**历史图测试（2 轮）**
+| 读取项 | 准确率 | 结论 |
+|---|---|---|
+| 顶部现价 | 2/2 | 稳定 |
+| 上方累计空头 116.88M | 2/2 | 稳定 |
+| 下方累计多头 238.17M | 2/2 | 稳定 |
+| tooltip 内价格 | 原提示词 0/2 | **措辞敏感**：会把顶部现价当答案 |
+| tooltip 内价格（改述后） | 4/4 | 提示词里明说"图里有两个价格"即可 |
+
+**现场对比测试（18:15 新取一轮，Agent 先读做标准答案）**
+| 图 | Agent 读数（标准答案） | 本地模型 v2 | 一致? |
+|---|---|---|---|
+| base | 现价 79,849 | 79,849 | ✅ |
+| upper | tooltip 80,722 / 空头 181.48M | 80,722 / 181.48M | ✅ |
+| lower | tooltip 78,577 / 多头 394.90M | 78,577 / 394.90M | ✅ |
+
+**3/3 完全一致，0.65–0.81 秒/张（温启动），冷启动 68.6 秒。**
+
+### 修掉的 3 个问题
+1. **幻觉**：上方 tooltip 里没有 `cumulative_long`，模型却报了 394.90M
+   → 传入 hover 方向参数，只要求对应字段
+2. **JSON 解析失败**：模型输出裸值 `"cumulative_long": 394.90M`（无引号）
+   → 正则给裸值补引号再 parse
+3. **数字格式不一**：`79.849` vs `79849`
+   → `norm_price()` 统一：小于 1000 视为千分位误写，×1000
+
+### 生产版用法
+```powershell
+$env:OLLAMA_MODELS = "E:\btc-ai\models"
+$PY = "C:\Users\81559\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe"
+
+& $PY E:\btc-ai\vl_coin.py base  <图>
+& $PY E:\btc-ai\vl_coin.py upper <图>    # hover 在现价上方 -> 要 cumulative_short
+& $PY E:\btc-ai\vl_coin.py lower <图>    # hover 在现价下方 -> 要 cumulative_long
+```
+输出：
+```json
+{"kind":"upper","top_current_price":79849,"tooltip_price":80722,"sec":0.81,"cumulative_short_m":181.48}
+```
+
+### 成本对比
+| | 改造前（Agent 读图） | 改造后（VLM 读图） |
+|---|---|---|
+| 每轮图片 token | ~4,500 | **0** |
+| 每轮文本 token | 0 | ~60 |
+| 图片是否留在上下文 | 永久累积（200 轮后约 34 万 token） | **从不进入** |
+| 上下文增长 | 每轮 +4,500 | 每轮 +60 |
+
+**图片 token 降低 98.7%，且彻底不再累积。**
+
+### 对比记录文件
+- `E:\btc-ai\logs\comparison-record.json`（完整结构化记录）
+- `D:\DP workspace\btc_system\data\vl-comparison-record.json`（项目内副本）
+
+### 下一步（还没做）
+1. **写 `local_fetch.py`**：Playwright 连 CDP 37086 自动截图 → 调 `vl_coin.py` → 追加 `market_snapshot.jsonl`
+2. **用 VLM 读坐标轴标签解决 hover 不对称**：今天全靠肉眼估 ±1.2%，经常上下距离不等（如 18:15 那次是 +1.09% vs -1.59%）。让脚本读轴标签算精确像素，这是 VLM 带来的额外收益
+3. **改定时任务**：30 分钟任务改成「读 JSONL + 判断」，不再调浏览器截图工具
+4. `E:\btc-ai\downloads\OllamaSetup.exe` 可以删了（省 1.6 GB）
+
+---
+
+## 19. AgentView（B+C）· 本地模型校验 · 自我复盘 · 已上生产
+
+### 19.1 AgentView 方案 B+C（2026-10-27 20:25 上线，已接到生产）
+**目的：把我的「判断」变成机器人能读的字段，不再只是聊天里说话。**
+
+`data/agent_view.json`（我写，机器人读）：
+```json
+{
+  "ts": "2026-10-27T20:25",
+  "mode": "live",
+  "direction_hint": "short",
+  "confidence": 0.45,
+  "size_mult": 0.75,
+  "veto_new": false,
+  "reasons": ["R(3%)=1.08 上下燃料接近平衡", "5条地缘降级信号但均无实质进展", "明日FOMC"],
+  "risk_flags": ["fomc_t1", "deescalation_talk", "r_neutral"]
+}
+```
+
+**接入点**：`run.py` 的 `if plan.ok:` 之后，`core/agent_view.py`。
+
+| 字段 | 效果 |
+|---|---|
+| `size_mult` | **方案 B**：乘到 `plan.size_contracts`，**只缩不放**（0~1） |
+| `veto_new` | **方案 C**：`true` 时跳过本次开仓，**已有仓位的止损/止盈/移动止损不受影响** |
+| `mode` | `"shadow"` 只记录不生效；`"live"` 真正生效 |
+| 过期 | 超过 **90 分钟**自动视为「无意见」，退化为 size_mult=1、veto=false |
+
+**安全设计**：
+- 任何异常都退回「无意见」，绝不阻塞交易主流程
+- 影响记录到 `data/agent_view_log.jsonl`，可事后评估它到底有没有用
+- 日志里会打印 `AgentView[鲜Xm live] short conf=0.45 size=0.75 veto=False`
+
+**写 AgentView 的方法**（Agent 用）：
+```python
+from core import agent_view
+agent_view.write_view(direction="short", confidence=0.45, size_mult=0.75,
+                      veto_new=False, reasons=[...],
+                      flags=["fomc_t1"], mode="live")
+```
+
+### 19.2 本地模型只读校验（2026-10-27 20:25 起跑，跑满 1 天后评估替换）
+- 每轮把三张截图存 `E:\btc-ai\snapshots\HHMM\`
+- 跑 `python E:\btc-ai\vl_coin.py base|upper|lower <图>`
+- 我的读数与 VLM 读数对比：
+  - 一致 → 答「VLM ✓」
+  - 不一致 → **必须判断谁错**，写进本文件 19.4 节
+- **此阶段不替换我的读数，只做交叉校验**
+
+**已知 VLM 缺陷（需持续观察）**：
+| 现象 | 出现频率 | 处理 |
+|---|---|---|
+| `top_current_price` 多乘 10（798,640） | 偶发 1/6 | 加 `>200000` 异常校验 |
+| 裸值 `394.90M` 未加引号导致 JSON 解析失败 | 已修 | `coerce_json()` 正则补引号 |
+| 幻觉报出不存在的 cumulative_long | 已修 | 按 hover 方向只要求对应字段 |
+| 冷启动首次推理 68 秒 | 每次重启后 | 预热一次即可 |
+
+### 19.3 清算地图口径统一为 3%（2026-10-27 20:25）
+- 原因：机器人自算的 `L2[PROXY]` 用 **3% 窗口**，我之前读 **1%**，两者不可比
+- 切换后实测：1% 口径 R=2.62 → **3% 口径 R=1.08**，与 proxy 的 0.77 方向一致
+- **教训：窗口不同，R 可以差 2.4 倍。以后报告 R 必须注明窗口。**
+
+**x 轴非线性（重要）**：
+CoinGlass 清算图的 x 轴标签越靠近现价越密，**用像素估算百分比会有系统误差**。
+正确做法：hover 后读 tooltip 里的真实价格，反算实际百分比，再决定是否调整。
+
+### 19.4 自我复盘日志（每 4 小时追加）
+
+| 时间 | 判断 | 实际 | 对/错 | 原因归类 | 改进动作 |
+|---|---|---|---|---|---|
+| 10-27 08:46 | 建议平多（L3 转强烈看空） | 系统同时自动 reverse_signal 平多，之后价格从 80,274 跌到 79,600 | ✅ 对 | — | — |
+| 10-27 全天下跌判断 | 坚持空单 | 空单浮盈最高 +7.16% | ✅ 对 | — | — |
+| 10-27 20:22 | 建议「减仓或平仓」空单（因伊朗降级信号） | 用户指出：伊朗表态无实质进展、美国仍在整军，权重不足 | ❌ 错 | **权重给高了：把单方面表态当成实质进展** | jin10 工具加「实质/表态」区分：表态降权 45%，实质加权 +2 |
+| 10-27 全时段 | 反复称"峰值 87,861 是 V1 残留" | 实测是 OKX 模拟盘 totalEq 单点毛刺（14:52 价格只动2点、权益跳1,677） | ❌ 错 | **诊断错误：没做价格反推验证就下结论** | perf.py 加滚动中位数去毛刺；以后异常数据先用价格反推理论值核对 |
+
+### 19.5 新闻漏报事故与修复（2026-10-27 20:15）
+
+**事故**：漏掉伊朗最高领袖「落实条件结束战争」、普京「考虑结束冲突解除制裁」两条重大新闻。
+
+**根因（4 条）**：
+1. 🔴 我用 `python tools_jin10_latest.py | Select-Object -First 3` **截断输出**，每轮只看到前 2 条噪音（个股公告/辟谣）
+2. 🔴 老工具按**时间倒序**排，不按重要度，噪音占据顶部
+3. 🟡 金十 API 单次只返回最近 **~15-20 分钟约 21 条**，不存档就无法回查
+4. 🔴 **认知偏差：只注意升级信号（打击/导弹/制裁），漏掉降级信号（停火/结束冲突/解除制裁）**
+
+**修复**：
+- 新工具 `tools_jin10.py`：
+  - 按**重要度**排序（战争=10、美联储=9、中东=7…）
+  - 只输出关键词命中的条目，噪音（辟谣/ST/盘初/直播）丢弃
+  - `--hours N` 时间窗口
+  - 自动存档 `data/news_log.jsonl`，可回查
+  - **区分「实质进展」与「单方面表态」**：表态降权 45%，实质进展加权 +2
+  - 修了 time 字段格式不稳定（可能是 `'YYYY-MM-DD HH:MM:SS'` 字符串）
+- 定时任务明确禁止截断输出，要求地缘新闻**双向扫描**
+
+**当前新闻权重表**（`tools_jin10.py` 的 `WEIGHTS`）：
+```
+战争/停火/停战 10 | 和平/结束冲突/哈梅内伊/霍尔木兹 9
+美联储/鲍威尔/FOMC/利率决议 9 | 伊朗/以色列/导弹/降息/加息/CPI/中期选举 8
+中东/打击/制裁/关税/特朗普/比特币/原油/OPEC/油价 7~8
+```
+
+### 19.6 自我优化机制（写进 4 小时任务）
+每 4 小时必须回顾：
+1. 过去 4 小时每 15 分钟的判断，方向对不对？（用当时价格 vs 现在价格对照）
+2. 哪次被证伪？原因归类：**数据源错 / 权重错 / 漏信息**
+3. 结论写进 19.4 节表格
+4. 需要改参数/权重/流程的，**先提方案问用户，不自行改交易逻辑**
+
+### 19.7 已修复的小问题
+| 问题 | 修复 |
+|---|---|
+| `perf.py` 峰值被毛刺污染（87,861 假峰） | 滚动中位数去毛刺（偏离 >800U 剔除），峰值回到 86,425，回撤 -3.82% → -2.23% |
+| 权益毛刺无提示 | perf.py 输出「⚠ 已剔除 N 个权益毛刺」 |
+| 1%/3% 窗口混用 | 统一 3%（与 proxy 对齐） |
+| V1 残留（误判） | **实际不存在**，是我诊断错了；真因是模拟盘 totalEq 毛刺 |

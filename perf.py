@@ -37,8 +37,27 @@ def main():
         rows = con.execute(
             "SELECT ts, equity FROM equity ORDER BY ts DESC LIMIT 1").fetchall()
     eq_now = rows[-1][1] if rows else 0
-    eq_max = max([r[1] for r in rows] + [eq_now])
-    eq_min = min([r[1] for r in rows] + [eq_now])
+
+    # ---- 权益去毛刺 ----
+    # OKX 模拟盘 totalEq 偶发单点异常（实测 14:52 价格只动 2 点、权益跳 1,677 USDT），
+    # 会被 max() 当成峰值导致回撤虚高。用滚动中位数剔除离群点。
+    series = [r[1] for r in rows] + [eq_now]
+    clean = []
+    spikes = []
+    W = 2
+    TOL = 800.0
+    for i, val in enumerate(series):
+        lo, hi = max(0, i - W), min(len(series), i + W + 1)
+        win = sorted(series[lo:hi])
+        med = win[len(win) // 2]
+        if abs(val - med) > TOL and len(win) >= 3:
+            spikes.append(val)
+            continue
+        clean.append(val)
+    if not clean:
+        clean = series
+    eq_max = max(clean)
+    eq_min = min(clean)
     dd = ((eq_now - eq_max) / eq_max * 100) if eq_max else 0
     pnl = eq_now - se if se else 0
     pnl_pct = (pnl / se * 100) if se else 0
@@ -86,6 +105,8 @@ def main():
     A(f"  区间盈亏     {pnl:+,.2f} USDT（{pnl_pct:+.2f}%）")
     A(f"  峰值 / 谷值  {eq_max:,.2f} / {eq_min:,.2f}")
     A(f"  当前回撤     {dd:+.2f}%")
+    if spikes:
+        A(f"  ⚠ 已剔除 {len(spikes)} 个权益毛刺（模拟盘 totalEq 异常）")
     A(f"  已平仓盈亏   {sum_pnl:+,.2f} USDT")
     A("")
     A("  ── 交易 ─────────────────────────────")

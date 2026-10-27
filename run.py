@@ -17,6 +17,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from core import agent_view
 from core import (events, executor, journal, liquidation, macro, market, risk,
                   scoring, shadow, strategy)
 from core.okx import OkxClient, OkxError
@@ -135,7 +136,7 @@ def _adopt_one(client, st, cfg, inst, policy, mine, journal):
         LOG.warning("策略=flatten，平掉该持仓")
         _tmp = journal.Position(side=side, entry=avg, size=size, model="ADOPT")
         executor.close_position(client, st, inst, cfg["lot_sz"], LOG, "policy_flatten",
-                                avg, cfg["ct_val"], pos=_tmp)
+                                avg, cfg["ct_val"], pos=_tmp, cfg=cfg)
         return
 
     if policy == "observe":
@@ -229,7 +230,7 @@ def cycle(client: OkxClient, cfg: dict, st: journal.BotState, cache: dict,
                                          inst, lot, LOG, "时间止损减半")
             else:
                 executor.close_position(client, st, inst, lot, LOG, reason, price,
-                                        cfg["ct_val"], pos=_p)
+                                        cfg["ct_val"], pos=_p, cfg=cfg)
             journal.save_state(st)
 
     # ---- 定时刷新数据层 ----
@@ -351,7 +352,8 @@ def cycle(client: OkxClient, cfg: dict, st: journal.BotState, cache: dict,
                     LOG.warning("   反向信号 conf=%.2f 足够强，平掉 %s 持仓给新方向让路",
                                 sig.confidence, _opp_side)
                     executor.close_position(client, st, inst, lot, LOG,
-                                            "reverse_signal", price, cfg["ct_val"], pos=_op)
+                                            "reverse_signal", price, cfg["ct_val"],
+                                            pos=_op, cfg=cfg)
                     journal.save_state(st)
                 else:
                     LOG.info("   相反方向仍持仓（%s），本信号不推翻它，可并行开仓", _opp_side)
@@ -377,6 +379,25 @@ def cycle(client: OkxClient, cfg: dict, st: journal.BotState, cache: dict,
                     )
                     LOG.info("   %s", plan.describe())
                     if plan.ok:
+                        # ---- AgentView（B+C）：只缩不放；veto 只拦新开仓，不碰持仓管理 ----
+                        _av = agent_view.load()
+                        if _av.ok:
+                            LOG.info("   %s", _av.summary())
+                            if _av.blocked():
+                                LOG.warning("   AgentView veto_new=true -> 跳过本次开仓（持仓管理不受影响）, 原因: %s",
+                                            "; ".join(_av.reasons[:2]))
+                                agent_view.log_apply("veto", plan.size_contracts, 0, _av,
+                                                    "signal=" + sig.model + "/" + sig.side)
+                                plan.ok = False
+                            else:
+                                _before = plan.size_contracts
+                                _after = _av.apply_size(_before)
+                                if abs(_after - _before) > 1e-9:
+                                    LOG.info("   AgentView size_mult=%.2f -> 张数 %.2f -> %.2f",
+                                             _av.size_mult, _before, _after)
+                                    plan.size_contracts = _after
+                                    agent_view.log_apply("size", _before, _after, _av,
+                                                        "signal=" + sig.model + "/" + sig.side)
                         if mode == "shadow" or dry_run:
                             # 影子模式：只记账，不下单
                             cache["shadow"].add(plan.signal if plan else sig, plan, sc, LOG)
