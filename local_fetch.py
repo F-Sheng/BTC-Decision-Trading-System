@@ -408,6 +408,38 @@ def fetch_map() -> dict:
         })
         # 校验
         _err = None
+        # 守卫①：累计值恰好等于「价格/100」——VLM 常把 tooltip 里的价格
+        # 误当成累计清算值（实测 78,798 -> 787.98M，校验原本拦不住）
+        for _lbl, _px, _val in (("upper", up_px, sm), ("lower", dn_px, lm)):
+            if _val and _px and abs(_val - _px / 100) < 1.5:
+                out["ok"] = False
+                out["why"] = ("validation failed: %s 累计值 %.2fM 疑似把价格 %.0f 读错"
+                              % (_lbl, _val, _px))
+                return out
+
+        # 守卫②：R 与上一轮快照突变 >40% -> 大概率读数错误
+        try:
+            _jl = ROOT / "data" / "market_snapshot.jsonl"
+            _prev_r = None
+            if _jl.exists():
+                for _ln in reversed(_jl.read_text(encoding="utf-8").splitlines()[-5:]):
+                    try:
+                        _o = json.loads(_ln)
+                        if _o.get("r") and _o.get("r_window") == "3%":
+                            _prev_r = float(_o["r"])
+                            break
+                    except Exception:
+                        continue
+            if _prev_r and sm and lm:
+                _cur_r = sm / lm
+                if abs(_cur_r - _prev_r) / _prev_r > 0.40:
+                    out["ok"] = False
+                    out["why"] = ("validation failed: R 突变 %.2f -> %.2f（>40%%），"
+                                  "疑似读数错误" % (_prev_r, _cur_r))
+                    return out
+        except Exception:
+            pass
+
         if not sm or not lm or sm <= 0 or lm <= 0:
             _err = "cumulative missing short=%s long=%s" % (sm, lm)
         elif abs(up_pct - dn_pct) > 1.8:
