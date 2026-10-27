@@ -220,11 +220,26 @@ def cycle(client: OkxClient, cfg: dict, st: journal.BotState, cache: dict,
     mode = cfg.get("execution_mode", "shadow")
 
     # 双向持仓：逐边管理
+    # ctx 用上一轮算好的方向/关键位（manage 在打分之前执行，cache 存的是上一轮结果）
+    _liq = cache.get("liq_last") or {}
+    _na = _liq.get("nearest_above")
+    _nb = _liq.get("nearest_below")
+    _ctx = {
+        "sys_dir": cache.get("sc_dir"),
+        "l3_dir": cache.get("l3_dir", 0),
+        "daily_dir": cache.get("daily_dir", 0),
+        "near_res": getattr(_na, "price", None) if _na else None,
+        "near_sup": getattr(_nb, "price", None) if _nb else None,
+        "news_adverse": bool(cache.get("news_adverse", False)),
+        "profit_flip": float(cfg.get("ct_profit_flip", 0.6)),
+        "touch_tol": float(cfg.get("touch_tol_usd", 100.0)),
+    }
     for _side in st.open_sides():
         _p = st.get_pos(_side)
         reason = executor.manage(client, st, price, cfg, inst, lot, LOG,
-                                 cfg["ct_val"], pos=_p)
-        if reason in ("time_stop_full", "time_stop_half", "TP1_full", "TP2_full", "TP3_full"):
+                                 cfg["ct_val"], pos=_p, ctx=_ctx)
+        if reason in ("time_stop_full", "time_stop_half", "TP1_full", "TP2_full",
+                      "TP3_full", "counter_trend_exit"):
             if reason == "time_stop_half":
                 executor.reduce_position(client, _p, _p.size * 0.5,
                                          inst, lot, LOG, "时间止损减半")
@@ -315,6 +330,15 @@ def cycle(client: OkxClient, cfg: dict, st: journal.BotState, cache: dict,
 
     l3 = cache["l3"]
     sc = scoring.build(cache["macro"], cache["liq"], cache["event"], l3, cfg)
+    # 供下一轮 manage 的逆势单退出条件使用
+    cache["sc_dir"] = getattr(sc, "direction", None)
+    cache["l3_dir"] = int(getattr(sc, "l3_bias", 0) or 0)
+    cache["liq_last"] = cache.get("liq") if isinstance(cache.get("liq"), dict) else {}
+    try:
+        _d1 = l3.get("1d") if isinstance(l3, dict) else None
+        cache["daily_dir"] = int(getattr(_d1, "bias", 0) or 0) if _d1 is not None else 0
+    except Exception:
+        cache["daily_dir"] = 0
 
     _parts = []
     for _sd in st.open_sides():

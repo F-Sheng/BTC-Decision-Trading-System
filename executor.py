@@ -50,6 +50,9 @@ def _maker_fill(client: OkxClient, inst_id: str, side: str, sz: str,
     # 2026-10-27：挂单不再贴 1 tick（成交率太低，今晚开仓就超时回退市价）。
     # 改为离现价 ~110 点挂，每次 requote 再放宽 60 点。
     # 用户思路：关键位 ±100 点判有效 -> 就在 ±110 挂。
+    # 2026-10-27：用户要求「关键位挂单」——挂单价基于关键位而非现价。
+    # 空单在阻力位上方 +offset 挂（价格涨到那里才成交，maker）；多单在支撑位下方 -offset 挂。
+    # px_override 由 _place_entry 传入关键位价格。
     _off0 = float(cfg.get("maker_offset_usd", 0) or 0)
     _off_step = float(cfg.get("maker_offset_step", 0) or 0)
 
@@ -59,7 +62,9 @@ def _maker_fill(client: OkxClient, inst_id: str, side: str, sz: str,
         else:
             base = bid if side == "sell" else ask
         off = _off0 + _off_step * step
-        if off <= 0:
+        # 关键位挂单时 _off_step 为负（110 -> 70 -> 30），逐步靠近现价提高成交率；
+        # 兜底不低于 2 tick，避免变成吃单。
+        if off <= tick * 2:
             off = tick * 2
         adj = base + off if side == "sell" else base - off
         dec = max(0, len(str(tick).split(".")[-1]) if "." in str(tick) else 0)
@@ -98,9 +103,16 @@ def _maker_fill(client: OkxClient, inst_id: str, side: str, sz: str,
 def _place_entry(client: OkxClient, inst_id: str, side: str, sz: str,
                  pos_side: str, tick: float, ref_px: float, cfg: dict,
                  logger, tag: str) -> tuple[str, float]:
-    """优先 maker，失败按配置回退市价。返回 (ordId, 成交价或 0)。"""
+    """优先 maker，失败按配置回退市价。返回 (ordId, 成交价或 0)。
+
+    2026-10-27（用户要求）：挂单基准改为「信号的关键位」而不是现价。
+      · ref_px 就是 risk.finalize 依据技术位算出的入场价（关键位）
+      · 空单在关键位上方 +offset 挂、多单在关键位下方 -offset 挂
+      · 关键位没被触及就不成交 -> 宁可不做，也不追价
+    """
+    _key = ref_px if cfg.get("maker_at_key", False) and ref_px else None
     ok, avg, oid = _maker_fill(client, inst_id, side, sz, pos_side,
-                               tick, cfg, logger, tag=tag)
+                               tick, cfg, logger, tag=tag, px_override=_key)
     if ok:
         return oid, avg
     if cfg.get("maker_fallback_market", True):
@@ -328,8 +340,20 @@ def _reconcile_one(client, st, inst_id, price, logger, ct_val, side_):
 
 def manage(client: OkxClient, st: BotState, price: float, cfg: dict,
            inst_id: str, lot_sz: float, logger, ct_val: float = 0.01,
-           pos: Position | None = None) -> str | None:
-    """分批止盈 + 移动止损 + 时间止损 + 软件兜底止损。返回触发的原因。"""
+           pos: Position | None = None, ctx: dict | None = None) -> str | None:
+    """分批止盈 + 移动止损 + 时间止损 + 软件兜底止损 + 逆势单专属退出。
+
+    ctx（可选，由 run.py 传入）：{
+      "sys_dir": "long"/"short",          # 系统主方向
+      "daily_dir": -1/0/1,                # 日线方向
+      "l3_dir": -1/0/1,                   # L3 技术触发方向
+      "near_res": float|None,             # 最近阻力位
+      "near_sup": float|None,             # 最近支撑位
+      "news_adverse": bool,               # 是否有高权重反向突发
+      "profit_flip": float,               # 从最高浮盈回撤超过这个比例视为被抽
+      "touch_tol": float,                 # 关键位容差（默认 100）
+    }
+    """
     pos = pos if pos is not None else st.position
     if not pos.is_open:
         return None
@@ -402,6 +426,49 @@ def manage(client: OkxClient, st: BotState, price: float, cfg: dict,
                                 old, pos.stop, pnl_r, _mret * 100, lock_r)
                 except Exception as e:
                     logger.warning("移动止损挂单失败: %s", e)
+
+    # ================= 逆势单专属退出条件（2026-10-27 新增）=================
+    # 逆势单默认只有止盈止损，缺少「趋势/结构/事件」退出，容易一路扛到止损。
+    # 这里补 4 条，任一命中即处理；只对 pos.counter_trend=True 生效。
+    if getattr(pos, "counter_trend", False) and ctx:
+        _ctv2 = float(ct_val or 0.01)
+        _tol = float(ctx.get("touch_tol", 100.0) or 100.0)
+        _adverse_sign = -1 if pos.side == "long" else 1   # 对多头不利=跌
+        _l3 = int(ctx.get("l3_dir") or 0)
+        _dd = int(ctx.get("daily_dir") or 0)
+        _pnl_pct = (pnl / (pos.size * _ctv2 * pos.entry) * 100
+                    if pos.size and pos.entry else 0.0)
+        _peak = float(getattr(pos, "peak_pnl_pct", 0.0) or 0.0)
+
+        # ① 趋势恶化：L3 与日线同时不利，且已亏 0.3R 以上 -> 全部平掉
+        if _l3 == _adverse_sign and _dd == _adverse_sign and pnl_r <= -0.3:
+            logger.warning("逆势单退出[趋势恶化] L3=%d 日线=%d 盈利%.2fR -> 平仓",
+                           _l3, _dd, pnl_r)
+            return "counter_trend_exit"
+
+        # ② 关键位被抽：多头在阻力位附近被压回、空头在支撑位附近被顶回
+        #    peak 曾盈利 > 0.3%，且从峰值回撤超过 profit_flip（默认 60%）
+        if _peak > 0.3 and _pnl_pct < _peak * (1 - float(ctx.get("profit_flip", 0.6))):
+            logger.warning("逆势单退出[利润被抽] 峰值%.2f%% -> 现%.2f%%",
+                           _peak, _pnl_pct)
+            return "counter_trend_exit"
+
+        # ③ 突发事件反向
+        if ctx.get("news_adverse"):
+            logger.warning("逆势单退出[突发事件反向] -> 平仓")
+            return "counter_trend_exit"
+
+        # ④ 触碰关键位后掉头：多头触及阻力、空头触及支撑后回落/反弹超过容差
+        if pos.side == "long":
+            _res = ctx.get("near_res")
+            if _res and price <= _res - _tol and _peak > 0.2:
+                logger.warning("逆势单退出[阻力位被抽] 阻力%.1f 现价%.1f", _res, price)
+                return "counter_trend_exit"
+        else:
+            _sup = ctx.get("near_sup")
+            if _sup and price >= _sup + _tol and _peak > 0.2:
+                logger.warning("逆势单退出[支撑位被顶] 支撑%.1f 现价%.1f", _sup, price)
+                return "counter_trend_exit"
 
     for i, tp in enumerate(tps):
         if i in pos.tp_filled:

@@ -61,6 +61,7 @@
   "trail_start_r": 0.5,
   "trail_start_margin": 0.08,
   "maker_offset_usd": 110,
-  "maker_offset_step": 60,
-  "counter_trend_trail_r": 0.3
+  "maker_offset_step": -40,
+  "counter_trend_trail_r": 0.3,
+  "maker_at_key": true
 }
