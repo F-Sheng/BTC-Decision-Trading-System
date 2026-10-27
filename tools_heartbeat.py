@@ -114,7 +114,9 @@ def l1() -> dict:
 def l2() -> dict:
     """慢层：X 多账号 + 本地模型摘要 + LV oi/regime + Odaily 宏观（约 3 分钟）"""
     out = {"tier": "L2"}
-    ok, txt = run([PY, "tools_x_multi.py"], timeout=600)
+    # 2026-10-28 用户指出：读「正在关注」时间线比跑 4 批账号搜索更快更准
+    # （实测 28-36 秒拿到 6-8 条 2-5 分钟内的推文，而账号搜索拿到的是 10月26日的旧内容）
+    ok, txt = run([PY, "tools_x_following.py"], timeout=300)
     out["x_fetch_ok"] = ok
     if ok:
         for ln in txt.splitlines():
