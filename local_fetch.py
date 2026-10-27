@@ -321,40 +321,58 @@ def fetch_map() -> dict:
             return out
         out["spot"] = spot
 
-        # 2) 上下各取多个候选，最后选「最对称的一对」
-        def candidates(sign: int):
-            """sign=+1 上侧, -1 下侧。返回 [(result, pct, why), ...]"""
-            outl = []
-            for frac in (0.62, 0.72, 0.55, 0.82, 0.68, 0.78, 0.92, 0.50):
-                x = int(cl + cw * frac) if sign > 0 else int(cl + cw * (1 - frac))
-                x = max(int(cl + 10), min(int(cl + cw - 10), x))
-                kind = "upper" if sign > 0 else "lower"
-                r, why = _read_side(pg, base, snapdir, kind, x, mid_y, kind)
-                if not r:
+        # 2) 上下各读一个落在目标区的位置（贪心 + 早退）
+        #    目标优先 2.6~3.6%（更接近 3%）。
+        #    早期版本每侧试 8 档、每档 2-3 次 VLM -> 单轮地图 190 秒；
+        #    改成命中目标区立刻返回，最多 4+4 档，预计降到 40~70 秒。
+        _FRACS = (0.66, 0.62, 0.71, 0.57, 0.75, 0.53, 0.80, 0.49)
+
+        def _try(sign: int, frac: float):
+            x = int(cl + cw * frac) if sign > 0 else int(cl + cw * (1 - frac))
+            x = max(int(cl + 10), min(int(cl + cw - 10), x))
+            kind = "upper" if sign > 0 else "lower"
+            r, why = _read_side(pg, base, snapdir, kind, x, mid_y, kind)
+            if not r:
+                return None, None, why
+            px = r["tooltip_price"]
+            pct = (px - spot) / spot * 100 if sign > 0 else (spot - px) / spot * 100
+            return r, pct, why
+
+        def pick(sign: int):
+            best = (None, None, "no acceptable position")
+            for frac in _FRACS[:4]:
+                r, pct, why = _try(sign, frac)
+                if r is None:
                     continue
-                px = r["tooltip_price"]
-                pct = (px - spot) / spot * 100 if sign > 0 else (spot - px) / spot * 100
-                if 2.0 <= pct <= 5.0:
-                    outl.append((r, pct, why))
-            return outl
+                if 2.6 <= pct <= 3.6:
+                    return r, pct, why
+                if 2.0 <= pct <= 5.0 and best[0] is None:
+                    best = (r, pct, why)
+            return best
 
-        up_c = candidates(+1)
-        dn_c = candidates(-1)
+        up, up_pct, up_why = pick(+1)
+        dn, dn_pct, dn_why = pick(-1)
 
-        # 选 |上侧pct - 下侧pct| 最小的一对，避免窗口不对称
-        up = dn = None
-        up_pct = dn_pct = None
-        up_why = dn_why = "no acceptable position"
-        best = 99.0
-        for ur, up_, uw in up_c:
-            for dr, dp_, dw in dn_c:
-                gap = abs(up_ - dp_)
-                if gap < best:
-                    best, up, up_pct, up_why = gap, ur, up_, uw
-                    dn, dn_pct, dn_why = dr, dp_, dw
-        if up is not None:
-            up_why = "%s | gap=%.2fpt" % (up_why, best)
-            dn_why = "%s | gap=%.2fpt" % (dn_why, best)
+        # 两侧差距过大 -> 各补试一档，取更接近对方的那一档
+        if up is not None and dn is not None and abs(up_pct - dn_pct) > 0.9:
+            for sign in (+1, -1):
+                cur_pct = up_pct if sign > 0 else dn_pct
+                other_pct = dn_pct if sign > 0 else up_pct
+                for frac in _FRACS[4:6]:
+                    r, pct, why = _try(sign, frac)
+                    if r is None or not (2.0 <= pct <= 5.0):
+                        continue
+                    if abs(pct - other_pct) < abs(cur_pct - other_pct):
+                        if sign > 0:
+                            up, up_pct, up_why = r, pct, why
+                        else:
+                            dn, dn_pct, dn_why = r, pct, why
+                        break
+
+        if up is not None and dn is not None:
+            gap = abs(up_pct - dn_pct)
+            up_why = "%s | gap=%.2fpt" % (up_why, gap)
+            dn_why = "%s | gap=%.2fpt" % (dn_why, gap)
 
         out["up_why"], out["dn_why"] = up_why, dn_why
         if not up or not dn:
