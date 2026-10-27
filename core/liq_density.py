@@ -44,11 +44,16 @@ def ingest() -> dict:
     from .okx import OkxClient
 
     try:
-        c = OkxClient(simulated=True)
-        r = c._request("GET", "/api/v5/public/liquidation-orders",
-                       {"instType": "SWAP", "uly": "BTC-USDT",
-                        "state": "filled", "limit": "100"})
-        data = r.get("data") or []
+        # 必须直连真实市场接口，不能带 x-simulated-trading 头（会返回 demo 垃圾数据）
+        import urllib.request as _ur
+        url = ("https://www.okx.com/api/v5/public/liquidation-orders"
+               "?instType=SWAP&uly=BTC-USDT&state=filled&limit=100")
+        op = _ur.build_opener(_ur.ProxyHandler({
+            "http": "http://127.0.0.1:57777",
+            "https": "http://127.0.0.1:57777"}))
+        req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        _d = json.loads(op.open(req, timeout=30).read().decode())
+        data = _d.get("data") or []
         details = (data[0].get("details") or []) if data else []
     except Exception as e:
         return {"ok": False, "why": str(e)[:80]}

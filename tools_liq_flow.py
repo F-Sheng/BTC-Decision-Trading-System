@@ -30,18 +30,32 @@ sys.path.insert(0, str(ROOT))
 STATE = ROOT / "data" / "liq_flow.json"
 
 # 触发阈值
-BURST_COUNT_5M = 20          # 最近 5 分钟强平条目数
-BURST_VOL_5M = 50000         # 最近 5 分钟爆仓张数（张，1 张 = 0.01 BTC）
-FRESH_SEC = 60               # 最新强平在 60 秒内 = 正在发生
+BURST_COUNT_5M = 12          # 最近 5 分钟强平条目数
+BURST_VOL_5M = 150         # 最近 5 分钟爆仓张数（张，1 张 = 0.01 BTC）
+FRESH_SEC = 90               # 最新强平在 60 秒内 = 正在发生
 
 
 def fetch():
-    from core.okx import OkxClient
-    c = OkxClient(simulated=True)
-    r = c._request("GET", "/api/v5/public/liquidation-orders",
-                   {"instType": "SWAP", "uly": "BTC-USDT",
-                    "state": "filled", "limit": "100"})
-    data = r.get("data") or []
+    """抓真实市场强平流（必须不带 x-simulated-trading 头）
+
+    2026-10-28 用户质疑「从来没有 80,120 这个数据」后查出根因：
+      OkxClient(simulated=True) 会带 x-simulated-trading: 1，
+      而 /public/liquidation-orders 在模拟盘返回的是 demo 垃圾数据：
+        带 simulated 头 -> 单笔最大 10,000 张、合计 300,292 张、价格含 80,120
+        不带          -> 单笔最大 91.93 张、合计 540 张、价格 80,366~80,789
+      虚高约 556 倍。LiquidVision 跨交易所数据也证实 80,050~80,200 区间没有清算。
+    """
+    import json as _json
+    import urllib.request as _ur
+    url = ("https://www.okx.com/api/v5/public/liquidation-orders"
+           "?instType=SWAP&uly=BTC-USDT&state=filled&limit=100")
+    op = _ur.build_opener(_ur.ProxyHandler({
+        "http": "http://127.0.0.1:57777",
+        "https": "http://127.0.0.1:57777"}))
+    req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0",
+                                    "Accept": "application/json"})
+    d = _json.loads(op.open(req, timeout=30).read().decode())
+    data = d.get("data") or []
     if not data:
         return []
     return data[0].get("details") or []

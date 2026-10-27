@@ -403,8 +403,14 @@ def manage(client: OkxClient, st: BotState, price: float, cfg: dict,
         _active = (pnl_r >= _start_r) or (_mret >= _start_m)
 
         if _active:
-            # 锁定 R：峰值 − trail_lock_r，但绝不让止损越过保本
-            lock_r = max(0.0, pnl_r - float(cfg.get("trail_lock_r", 0.5)))
+            # 锁定 R：2026-10-28 用户要求改成「留缓冲」版本。
+            # 旧逻辑 lock_r = pnl_r - 0.5，在 pnl_r=0.5 时锁 0R -> 止损=开仓价，
+            # 没有任何回撤空间，实测被 0.15% 的正常波动打掉，错失后续 0.75% 行情。
+            # 新逻辑：缓冲 = max(buffer_min_r, pnl_r * buffer_ratio)，最少 0.4R。
+            _buf_min = float(cfg.get("trail_buffer_min_r", 0.4))
+            _buf_ratio = float(cfg.get("trail_buffer_ratio", 0.4))
+            buffer_r = max(_buf_min, pnl_r * _buf_ratio)
+            lock_r = max(0.0, pnl_r - buffer_r)
             sign = -1 if pos.side == "short" else 1
             cand = pos.entry * (1 + sign * (risk_abs / pos.entry) * lock_r)
             better = (cand < pos.stop) if pos.side == "short" else (cand > pos.stop)

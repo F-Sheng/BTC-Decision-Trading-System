@@ -71,5 +71,7 @@
   "add_min_gap_pct": 0.5,
   "add_reject_pct": 0.35,
   "add_risk_cap": 1.6,
-  "add_blackout_h": 1.0
+  "add_blackout_h": 1.0,
+  "trail_buffer_min_r": 0.4,
+  "trail_buffer_ratio": 0.4
 }
