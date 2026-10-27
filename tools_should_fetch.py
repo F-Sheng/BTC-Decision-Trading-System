@@ -42,8 +42,8 @@ AGENTVIEW_WARN_MIN = 30      # AgentView 剩余不足该值时也强制刷新
 # 重要日历事件（本地时间，格式 YYYY-MM-DDTHH:MM）
 CALENDAR = [
     # FOMC 决议 + 新闻发布会
-    ("2026-10-28T02:00", "FOMC 利率决议"),
-    ("2026-10-28T02:30", "FOMC 新闻发布会"),
+    ("2026-10-29T02:00", "FOMC 利率决议"),
+    ("2026-10-29T02:30", "FOMC 新闻发布会"),
     # 用户可继续补充：非农、CPI 等
 ]
 CALENDAR_WINDOW_H = 2
