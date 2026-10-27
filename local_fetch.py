@@ -172,7 +172,7 @@ def _vlm_read(path: str, kind: str) -> dict:
         return {"error": str(e)}
 
 
-DIFF_NEAR = 760
+DIFF_NEAR = 1150
 DIFF_MIN_RUN = 120
 
 
