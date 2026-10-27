@@ -198,8 +198,14 @@ def build(macro_view: macro.MacroView, liq: liquidation.LiqView,
         sc.veto.append(f"1H布林带过窄({v1h.bb_width_pct*100:.2f}%<0.8%)")
     if v15 and v15.bb_width_pct < 0.0020:
         sc.veto.append(f"15M布林带过窄({v15.bb_width_pct*100:.2f}%)")
+    # 2026-10-28 用户明确要求：不要用「事件静默期」禁止开仓。
+    # 改为「提示 + 缩仓」，由风控决定仓位，不直接 veto。
     if event_view.blackout:
-        sc.veto.append("事件静默期")
+        sc.notes.append("事件窗口：建议缩仓（不禁止开仓）")
+        try:
+            sc.size_penalty = min(0.5, float(getattr(sc, "size_penalty", 1.0)))
+        except Exception:
+            pass
     if liq.fuel_distance_pct is not None and liq.fuel_distance_pct > 5:
         sc.notes.append("最近清算簇>5%，短期无磁铁")
 
