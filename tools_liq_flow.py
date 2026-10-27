@@ -30,36 +30,46 @@ sys.path.insert(0, str(ROOT))
 STATE = ROOT / "data" / "liq_flow.json"
 
 # 触发阈值
-BURST_COUNT_5M = 12          # 最近 5 分钟强平条目数
-BURST_VOL_5M = 150         # 最近 5 分钟爆仓张数（张，1 张 = 0.01 BTC）
-FRESH_SEC = 90               # 最新强平在 60 秒内 = 正在发生
+WINDOW_MIN = 60
+BURST_COUNT_5M = 6          # 最近 5 分钟强平条目数
+BURST_VOL_5M = 200         # 最近 5 分钟爆仓张数（张，1 张 = 0.01 BTC）
+FRESH_SEC = 30               # 最新强平在 60 秒内 = 正在发生
+
+
+CT_VAL = 0.01  # BTC-USDT-SWAP 1 张 = 0.01 BTC
 
 
 def fetch():
-    """抓真实市场强平流（必须不带 x-simulated-trading 头）
+    """抓真实强平流（LiquidVision，覆盖 7 家交易所）
 
-    2026-10-28 用户质疑「从来没有 80,120 这个数据」后查出根因：
-      OkxClient(simulated=True) 会带 x-simulated-trading: 1，
-      而 /public/liquidation-orders 在模拟盘返回的是 demo 垃圾数据：
-        带 simulated 头 -> 单笔最大 10,000 张、合计 300,292 张、价格含 80,120
-        不带          -> 单笔最大 91.93 张、合计 540 张、价格 80,366~80,789
-      虚高约 556 倍。LiquidVision 跨交易所数据也证实 80,050~80,200 区间没有清算。
+    2026-10-28 换源原因：OKX /public/liquidation-orders 数据滞后 64 分钟，
+    导致「60分钟 0 条」被误判成「市场平静」。LV 实测最新 156 秒前。
+
+    返回统一成与旧代码兼容的结构：
+      ts(ms) / side(buy|sell) / bkPx / sz(张) / posSide
+      · LV side="long"（多头被爆）-> 转成 side="sell"（卖单把多头打爆）
+      · LV side="short"（空头被爆）-> 转成 side="buy"
     """
-    import json as _json
-    import urllib.request as _ur
-    url = ("https://www.okx.com/api/v5/public/liquidation-orders"
-           "?instType=SWAP&uly=BTC-USDT&state=filled&limit=100")
-    op = _ur.build_opener(_ur.ProxyHandler({
-        "http": "http://127.0.0.1:57777",
-        "https": "http://127.0.0.1:57777"}))
-    req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0",
-                                    "Accept": "application/json"})
-    d = _json.loads(op.open(req, timeout=30).read().decode())
-    data = d.get("data") or []
-    if not data:
-        return []
-    return data[0].get("details") or []
+    from core import lv_api
 
+    rows = lv_api.get("/api/v1/liquidations?symbol=BTCUSDT&minutes=%d&limit=500"
+                      % WINDOW_MIN, timeout=45)
+    out = []
+    for r in (rows or []):
+        try:
+            qty = float(r.get("qty") or 0)
+            side_lv = (r.get("side") or "").lower()
+            out.append({
+                "ts": str(r.get("ts")),
+                "side": "sell" if side_lv == "long" else "buy",
+                "bkPx": str(r.get("price")),
+                "sz": str(round(qty / CT_VAL, 4)),   # 币 -> 张
+                "posSide": "long" if side_lv == "long" else "short",
+                "exchange": r.get("exchange"),
+            })
+        except Exception:
+            continue
+    return out
 
 def analyze(details: list) -> dict:
     now_ms = time.time() * 1000
@@ -150,7 +160,7 @@ def main():
         if not r.get("ok"):
             print("强平流获取失败:", r.get("why"))
             return 1
-        print("=== OKX 真实强平流 ===")
+        print("=== 真实强平流（LiquidVision · 7家交易所）===")
         print("  最新强平: %.0f 秒前 @ %.1f" % (r["age_sec"], r["newest_px"]))
         print("  100条覆盖: %.2f 小时" % r["span_hours"])
         for k, label in (("w5", "5分钟"), ("w15", "15分钟"), ("w60", "60分钟")):
