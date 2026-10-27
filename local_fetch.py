@@ -146,7 +146,7 @@ def _hover_at(pg: cdp.Page, x: int, y: int):
 
 
 def _crop_tooltip(src: str, dst: str, cx: int, cy: int,
-                  half_w: int = 430, half_h: int = 135) -> str:
+                  half_w: int = 600, half_h: int = 150) -> str:
     """裁出 hover 点附近区域供 VLM 精读。
 
     实测：上侧 hover 时 tooltip 出现在光标左侧，下侧 hover 时在右侧，
@@ -231,11 +231,18 @@ def fetch_map() -> dict:
             return r, str(cp)
 
         # 初始 offset：经验值 1% ≈ 110px，3% ≈ 330px
+        # 读失败时换几个偏移重试（tooltip 位置随光标变化，单点容易打偏）
         off = 330
         up, p_up = probe_up(off)
         up_px = up.get("tooltip_price")
+        for _try in (380, 280, 430):
+            if up_px:
+                break
+            off = _try
+            up, p_up = probe_up(off)
+            up_px = up.get("tooltip_price")
         if not up_px:
-            out["why"] = "upper read failed"
+            out["why"] = "upper read failed (tried 330/380/280/430)"
             return out
 
         # 校准：目标 3%，按实际百分比修正一次
@@ -268,6 +275,30 @@ def fetch_map() -> dict:
 
         if not up_px or not dn_px:
             out["why"] = "tooltip read failed"
+            return out
+
+        # ---- 有效性校验（防止脏数据进入 L2 打分）----
+        _up_pct = (up_px - spot) / spot * 100
+        _dn_pct = (spot - dn_px) / spot * 100
+        _sm = up.get("cumulative_short_m")
+        _lm = dn.get("cumulative_long_m")
+        _err = None
+        if not (2.0 <= _up_pct <= 5.0):
+            _err = "upper pct %.2f%% out of 2~5%%" % _up_pct
+        elif not (2.0 <= _dn_pct <= 5.0):
+            _err = "lower pct %.2f%% out of 2~5%%" % _dn_pct
+        elif abs(_up_pct - _dn_pct) > 1.8:
+            _err = "asymmetric window %.2f%% vs %.2f%%" % (_up_pct, _dn_pct)
+        elif not _sm or not _lm or _sm <= 0 or _lm <= 0:
+            _err = "cumulative missing short=%s long=%s" % (_sm, _lm)
+        else:
+            _r = _sm / _lm
+            if not (0.2 <= _r <= 5.0):
+                _err = "R=%.2f implausible" % _r
+        if _err:
+            out["why"] = "validation failed: " + _err
+            out["raw"] = {"up_pct": round(_up_pct, 2), "dn_pct": round(_dn_pct, 2),
+                          "short_m": _sm, "long_m": _lm}
             return out
 
         out.update({
@@ -486,6 +517,8 @@ def main():
             if not sm or not lm:
                 raise ValueError("cumulative missing: short=%s long=%s" % (sm, lm))
             r_val = round(sm / lm, 2)
+            if not (0.2 <= r_val <= 5.0):
+                raise ValueError("R=%.2f implausible, refuse to write" % r_val)
             snap = {
                 "ts": result["ts"], "px": m["spot"], "r": r_val,
                 "r_window": "3%",

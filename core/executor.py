@@ -23,6 +23,95 @@ def _round_lot(x: float, lot_sz: float) -> float:
     return math.floor(x / lot_sz) * lot_sz
 
 
+def _maker_fill(client: OkxClient, inst_id: str, side: str, sz: str,
+                pos_side: str | None, tick: float, cfg: dict, logger,
+                reduce_only: bool = False, tag: str = "",
+                px_override: float | None = None) -> tuple[bool, float, str]:
+    """post_only 限价单（maker 费率）。返回 (是否成交, 成交均价, ordId)。
+
+    定价规则（保证挂单不立即吃单）：
+      sell -> best_bid + 1 tick
+      buy  -> best_ask - 1 tick
+    未成交则每 requote_s 秒贴近 1 tick 重新挂，最多 requote 次。
+    """
+    if not cfg.get("maker_enabled", True):
+        return False, 0.0, ""
+
+    wait_s = float(cfg.get("maker_wait_s", 24))
+    requote = int(cfg.get("maker_requote", 2))
+    interval = max(3.0, wait_s / (requote + 1))
+    pool = cfg.get("pool") if False else None
+    _tk = client.ticker(inst_id)
+    bid = float(_tk.get("bidPx") or 0)
+    ask = float(_tk.get("askPx") or 0)
+    if bid <= 0 or ask <= 0:
+        return False, 0.0, ""
+
+    # 2026-10-27：挂单不再贴 1 tick（成交率太低，今晚开仓就超时回退市价）。
+    # 改为离现价 ~110 点挂，每次 requote 再放宽 60 点。
+    # 用户思路：关键位 ±100 点判有效 -> 就在 ±110 挂。
+    _off0 = float(cfg.get("maker_offset_usd", 0) or 0)
+    _off_step = float(cfg.get("maker_offset_step", 0) or 0)
+
+    def _px(step: int) -> str:
+        if px_override is not None:
+            base = px_override
+        else:
+            base = bid if side == "sell" else ask
+        off = _off0 + _off_step * step
+        if off <= 0:
+            off = tick * 2
+        adj = base + off if side == "sell" else base - off
+        dec = max(0, len(str(tick).split(".")[-1]) if "." in str(tick) else 0)
+        return f"{round(adj / tick) * tick:.{dec}f}"
+
+    for step in range(requote + 1):
+        cl = f"MK{int(time.time()) % 1000000}{step}"
+        try:
+            r = client.place_order(inst_id, side, sz, ord_type="post_only",
+                                   px=_px(step), reduce_only=reduce_only,
+                                   pos_side=pos_side, cl_ord_id=cl)
+        except OkxError as e:
+            logger.warning("maker 挂单被拒(%s，多为会立即成交) ", e)
+            # post_only 被拒通常意味着价格会穿越，贴近 1 tick 再试
+            time.sleep(0.6)
+            continue
+        oid = r.get("ordId", "")
+        deadline = time.time() + interval
+        while time.time() < deadline:
+            time.sleep(0.8)
+            try:
+                o = client.get_order(inst_id, ord_id=oid)
+            except Exception:
+                continue
+            if o.get("state") == "filled":
+                avg = float(o.get("avgPx") or 0)
+                logger.info("maker 成交 %s %s张 @%.1f (ordId=%s)",
+                            side, o.get("accFillSz", sz), avg, oid)
+                return True, avg, oid
+            if o.get("state") in ("canceled", "mmp_canceled"):
+                break
+        client.cancel_order(inst_id, oid)
+    return False, 0.0, ""
+
+
+def _place_entry(client: OkxClient, inst_id: str, side: str, sz: str,
+                 pos_side: str, tick: float, ref_px: float, cfg: dict,
+                 logger, tag: str) -> tuple[str, float]:
+    """优先 maker，失败按配置回退市价。返回 (ordId, 成交价或 0)。"""
+    ok, avg, oid = _maker_fill(client, inst_id, side, sz, pos_side,
+                               tick, cfg, logger, tag=tag)
+    if ok:
+        return oid, avg
+    if cfg.get("maker_fallback_market", True):
+        logger.info("maker 未成交，回退市价（taker 0.05%%）")
+        r = client.place_order(inst_id, side, sz, ord_type="market",
+                               pos_side=pos_side, cl_ord_id=tag)
+        return r.get("ordId", ""), 0.0
+    logger.error("maker 未成交且未开启回退，放弃本次开仓")
+    return "", -1.0
+
+
 def open_position(client: OkxClient, sig: Signal, plan: Plan, cfg: dict,
                   inst_id: str, lot_sz: float, logger) -> Position | None:
     """市价开仓 + 挂交易所侧止损。
@@ -36,9 +125,16 @@ def open_position(client: OkxClient, sig: Signal, plan: Plan, cfg: dict,
     sz = _f(plan.size_contracts, lot_sz)
     tag = f"BSYS{int(time.time())%1000000}"
     try:
-        r = client.place_order(inst_id, side, sz, ord_type="market",
-                               cl_ord_id=tag, pos_side=pside)
-        logger.info("开仓成交: %s %s %s张 ordId=%s", side, sz, inst_id, r.get("ordId"))
+        tick = float(client.instrument(inst_id).get("tickSz") or 0.01)
+    except Exception:
+        tick = 0.01
+    try:
+        ord_id, filled_px = _place_entry(client, inst_id, side, sz, pside,
+                                        tick, psig.entry, cfg, logger, tag)
+        if filled_px == -1.0:
+            return None
+        logger.info("开仓下单: %s %s张 ordId=%s（%s）", side, sz, ord_id,
+                    "maker" if filled_px > 0 else "taker")
     except OkxError as e:
         logger.error("开仓失败: %s", e)
         return None
@@ -84,9 +180,17 @@ def reduce_position(client: OkxClient, pos: Position, qty: float,
         return False
     side = "buy" if pos.side == "short" else "sell"
     try:
-        client.place_order(inst_id, side, _f(qty, lot_sz), pos_side=pos.side,
-                           reduce_only=True, ord_type="market")
-        logger.info("减仓 %s %.2f张 原因=%s", side, qty, reason)
+        _cfg = cfg if isinstance(cfg, dict) else {}
+        _tick = float(client.instrument(inst_id).get("tickSz") or 0.01)
+        _ok, _avg, _oid = _maker_fill(client, inst_id, side, _f(qty, lot_sz),
+                                      pos.side, _tick, _cfg, logger,
+                                      reduce_only=True)
+        if not _ok:
+            client.place_order(inst_id, side, _f(qty, lot_sz), pos_side=pos.side,
+                               reduce_only=True, ord_type="market")
+            logger.info("减仓(taker) %s %.2f张 原因=%s", side, qty, reason)
+        else:
+            logger.info("减仓(maker) %s %.2f张 原因=%s @%.1f", side, qty, reason, _avg)
         pos.size = round(pos.size - qty, 6)
         return True
     except OkxError as e:
@@ -96,7 +200,8 @@ def reduce_position(client: OkxClient, pos: Position, qty: float,
 
 def close_position(client: OkxClient, st: BotState, inst_id: str, lot_sz: float,
                    logger, reason: str, exit_px: float | None = None,
-                   ct_val: float = 0.01, pos: Position | None = None) -> None:
+                   ct_val: float = 0.01, pos: Position | None = None,
+                   cfg: dict | None = None) -> None:
     pos = pos if pos is not None else st.position
     if not pos.is_open:
         return
@@ -107,14 +212,34 @@ def close_position(client: OkxClient, st: BotState, inst_id: str, lot_sz: float,
         except OkxError as e:
             logger.warning("撤销止损失败: %s", e)
     side = "buy" if pos.side == "short" else "sell"
-    try:
-        client.place_order(inst_id, side, _f(pos.size, lot_sz),
-                           reduce_only=True, ord_type="market", pos_side=pos.side)
-    except OkxError as e:
-        logger.error("平仓失败: %s", e)
-        return
+    _fast = reason in ("stop", "exchange_stop", "liquidate", "risk",
+                      "soft_stop", "policy_flatten", "trail_stop")
+    _filled_px = 0.0
+    _done = False
+    if not _fast:
+        try:
+            _tick = float(client.instrument(inst_id).get("tickSz") or 0.01)
+            _ok, _avg, _oid = _maker_fill(client, inst_id, side,
+                                          _f(pos.size, lot_sz), pos.side, _tick,
+                                          cfg if isinstance(cfg, dict) else {},
+                                          logger, reduce_only=True)
+            if _ok:
+                _filled_px = _avg
+                _done = True
+                logger.info("平仓(maker) 成交 @%.1f 原因=%s", _avg, reason)
+        except Exception as e:
+            logger.warning("maker 平仓异常，改用市价: %s", e)
+    if not _done:
+        try:
+            client.place_order(inst_id, side, _f(pos.size, lot_sz),
+                               reduce_only=True, ord_type="market", pos_side=pos.side)
+            if not _fast:
+                logger.info("平仓回退市价(taker) 原因=%s", reason)
+        except OkxError as e:
+            logger.error("平仓失败: %s", e)
+            return
 
-    px = exit_px or pos.entry
+    px = (exit_px or _filled_px or pos.entry)
     pnl_pct = safe_div((px - pos.entry) if pos.side == "long" else (pos.entry - px), pos.entry)
     r_mult = safe_div(pnl_pct, safe_div(abs(pos.stop - pos.entry), pos.entry))
     # 名义价值 = 张数 × 每张标的数量 × 价格（修复：原先硬编码 ×10，导致高估 1000 倍）
@@ -236,8 +361,26 @@ def manage(client: OkxClient, st: BotState, price: float, cfg: dict,
         pos.risk0 = risk_abs
     if risk_abs > 0 and pos.entry > 0:
         pnl_r = pnl * pos.entry / risk_abs          # 当前盈亏折成 R
-        if pnl_r >= 1.0:
-            lock_r = pnl_r - float(cfg.get("trail_lock_r", 0.5))
+
+        # 2026-10-27 修复：原门槛 1R = 止损距离（本系统 1.56%），
+        # 导致价格朝有利方向走 1.0%（浮盈已达保证金 +10%）仍不启动保护。
+        # 现在满足任一即启动：
+        #   ① 盈利 >= trail_start_r（默认 0.5R，约 0.78% 价格）
+        #   ② 保证金收益率 >= trail_start_margin（默认 8%，约 0.8% 价格）
+        _lev = float(cfg.get("leverage", 10) or 10)
+        _ctv = float(cfg.get("ct_val", 0.01) or 0.01)
+        _margin = pos.size * _ctv * pos.entry / _lev if _lev else 0.0
+        _mret = (pnl / _margin) if _margin > 0 else 0.0
+        _is_counter = bool(getattr(pos, "counter_trend", False))
+        _start_r = float(cfg.get("counter_trend_trail_r" if _is_counter
+                                 else "trail_start_r",
+                                 0.3 if _is_counter else 0.5))
+        _start_m = float(cfg.get("trail_start_margin", 0.08))
+        _active = (pnl_r >= _start_r) or (_mret >= _start_m)
+
+        if _active:
+            # 锁定 R：峰值 − trail_lock_r，但绝不让止损越过保本
+            lock_r = max(0.0, pnl_r - float(cfg.get("trail_lock_r", 0.5)))
             sign = -1 if pos.side == "short" else 1
             cand = pos.entry * (1 + sign * (risk_abs / pos.entry) * lock_r)
             better = (cand < pos.stop) if pos.side == "short" else (cand > pos.stop)
@@ -255,8 +398,8 @@ def manage(client: OkxClient, st: BotState, price: float, cfg: dict,
                         _f(pos.size, lot_sz), pos.stop, pos_side=pos.side,
                         cl_ord_id=f"TR{int(time.time()) % 1000000}")
                     pos.algo_id = a.get("algoId", "")
-                    logger.info("移动止损 %.1f -> %.1f（盈利%.2fR，锁定%.2fR）",
-                                old, pos.stop, pnl_r, lock_r)
+                    logger.info("移动止损 %.1f -> %.1f（盈利%.2fR / 保证金%+.1f%%，锁定%.2fR）",
+                                old, pos.stop, pnl_r, _mret * 100, lock_r)
                 except Exception as e:
                     logger.warning("移动止损挂单失败: %s", e)
 

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from .utils import ROOT, read_json, safe_div
 
 FILE = ROOT / "data" / "coinglass.json"
-FRESH_SEC = 2 * 3600
+FRESH_SEC = 40 * 60   # 2026-10-27: 原 2h 太长，15 分钟节奏下 40 分钟即过期
 STALE_SEC = 12 * 3600
 
 
