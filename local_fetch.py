@@ -172,8 +172,98 @@ def _vlm_read(path: str, kind: str) -> dict:
         return {"error": str(e)}
 
 
+DIFF_NEAR = 760
+DIFF_MIN_RUN = 120
+
+
+def _diff_box(base_path: str, hover_path: str, cx: int, cy: int):
+    """用「无 hover / 有 hover」两张图差分，精确定位 tooltip 矩形。
+
+    这是关键改进：固定偏移裁剪会把右侧 y 轴刻度包含进去，
+    VLM 会把 "757.94M" 当成累计值（实测读成 78359）、把价格读成 410310。
+    差分框只覆盖真正变化的 tooltip 区域，天然排除坐标轴。
+    """
+    try:
+        import numpy as np
+
+        a = np.asarray(Image.open(base_path).convert("L"), dtype=np.int16)
+        b = np.asarray(Image.open(hover_path).convert("L"), dtype=np.int16)
+        if a.shape != b.shape:
+            return None
+        h, w = a.shape
+        d = np.abs(a - b)
+        x0, x1 = max(0, cx - DIFF_NEAR), min(w, cx + DIFF_NEAR)
+        y0, y1 = max(0, cy - 260), min(h, cy + 260)
+        sub = d[y0:y1, x0:x1]
+        mask = sub > 18
+        rowcnt = mask.sum(axis=1)
+        rows = np.where(rowcnt >= DIFF_MIN_RUN)[0]
+        if len(rows) < 8:
+            return None
+        top, bot = y0 + int(rows.min()), y0 + int(rows.max()) + 1
+        band = mask[rows.min():rows.max() + 1, :]
+        colcnt = band.sum(axis=0)
+        cols = np.where(colcnt >= max(6, band.shape[0] // 3))[0]
+        if len(cols) < 20:
+            return None
+        left, right = x0 + int(cols.min()), x0 + int(cols.max()) + 1
+        if right - left < 80 or bot - top < 30:
+            return None
+        pad = 8
+        return (max(0, left - pad), max(0, top - pad),
+                min(w, right + pad), min(h, bot + pad))
+    except Exception:
+        return None
+
+
+def _read_side(pg, base_path, snapdir, tag, x, y, kind):
+    """hover -> 截图 -> 差分定位 -> 裁剪 -> VLM 读两次（双读校验）。
+
+    返回 (结果 dict 或 None, 说明)
+    """
+    pg.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y,
+                                         "button": "none", "buttons": 0})
+    time.sleep(0.7)
+    hp = snapdir / ("hover_%s.jpg" % tag)
+    pg.screenshot(str(hp), quality=60)
+    box = _diff_box(str(base_path), str(hp), x, y)
+    if not box:
+        return None, "diff locate failed"
+
+    img = Image.open(str(hp))
+    # 双读：两种 padding，结果必须一致
+    reads = []
+    for pad in (8, 14):
+        b2 = (max(0, box[0] - pad), max(0, box[1] - pad),
+              min(img.width, box[2] + pad), min(img.height, box[3] + pad))
+        cp = snapdir / ("crop_%s_%d.jpg" % (tag, pad))
+        img.crop(b2).save(str(cp), quality=95)
+        r = _vlm_read(str(cp), kind)
+        reads.append(r)
+
+    key = "cumulative_short_m" if kind == "upper" else "cumulative_long_m"
+    p1, p2 = reads[0].get("tooltip_price"), reads[1].get("tooltip_price")
+    c1, c2 = reads[0].get(key), reads[1].get(key)
+    if p1 and p2 and p1 == p2 and c1 and c2 and abs(c1 - c2) < 0.5:
+        return {"tooltip_price": p1, key: c1}, "dual-read OK"
+    # 不一致 -> 第三次
+    r3 = _vlm_read(str(snapdir / ("crop_%s_8.jpg" % tag)), kind)
+    cands_p = [v for v in (p1, p2, r3.get("tooltip_price")) if v]
+    cands_c = [v for v in (c1, c2, r3.get(key)) if v]
+    if not cands_p or not cands_c:
+        return None, "triple-read empty"
+    from collections import Counter
+    mp = Counter(cands_p).most_common(1)[0][0]
+    mc = Counter([round(v, 2) for v in cands_c]).most_common(1)[0][0]
+    agree_p = sum(1 for v in cands_p if v == mp)
+    agree_c = sum(1 for v in cands_c if abs(v - mc) < 0.5)
+    if agree_p >= 2 and agree_c >= 2:
+        return {"tooltip_price": mp, key: mc}, "triple-read majority"
+    return None, "INCONSISTENT: px=%s cum=%s" % (cands_p, cands_c)
+
+
 def fetch_map() -> dict:
-    """返回 {spot, upper:{px,short}, lower:{px,long}, shots:[...]}"""
+    """返回 {spot, upper:{px,short_m,pct}, lower:{px,long_m,pct}, shots:[...]}"""
     snapdir = SNAP_BASE / datetime.now().strftime("%H%M")
     snapdir.mkdir(parents=True, exist_ok=True)
 
@@ -182,133 +272,78 @@ def fetch_map() -> dict:
     try:
         pg.goto(MAP_URL, wait=4.0)
         _hard_reload(pg, 6.0)
+
         info = json.loads(pg.eval_js(JS_MAP_READY) or "{}")
         if not info.get("ok"):
             out["why"] = info.get("why", "map not ready")
             return out
+        cl, ct, cw, ch = info["left"], info["top"], info["w"], info["h"]
+        mid_y = int(ct + ch * 0.45)
 
-        cv_left = info["left"]
-        cv_top = info["top"]
-        cv_w = info["w"]
-        cv_h = info["h"]
-        mid_y = int(cv_top + cv_h * 0.45)
+        # 1) 无 hover 基准图（鼠标移出图表）
+        pg.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 5, "y": 5,
+                                             "button": "none", "buttons": 0})
+        time.sleep(0.6)
+        base = snapdir / "base.jpg"
+        pg.screenshot(str(base), quality=60)
+        out["shots"].append(str(base))
 
-        # 1) 基础截图 -> VLM 读现价（页面文本读不到时兜底）
-        p_base = snapdir / "1_base.jpg"
-        pg.screenshot(str(p_base), quality=50)
-        out["shots"].append(str(p_base))
-        base = _vlm_read(str(p_base), "base")
-        spot = base.get("top_current_price") or info.get("price")
+        # 现价：页面文本（比 VLM 可靠）
+        spot = info.get("price")
+        if not spot:
+            b = _vlm_read(str(base), "base")
+            spot = b.get("top_current_price")
         if not spot:
             out["why"] = "no spot price"
             return out
         out["spot"] = spot
 
-        # 2) 现价对应的 x：用图中心估算，再用 VLM 反馈校准
-        #    CoinGlass 清算图的现价大致在画布中央偏右，先取 55% 位置
-        x_center = int(cv_left + cv_w * 0.50)
+        # 2) 上方 ~3%：从画布 55% 处向右找，逐步加距离
+        def find_side(sign: int):
+            """sign=+1 上侧, -1 下侧"""
+            for frac in (0.62, 0.72, 0.82, 0.92, 0.50, 0.42):
+                x = int(cl + cw * frac) if sign > 0 else int(cl + cw * (1 - frac))
+                x = max(int(cl + 10), min(int(cl + cw - 10), x))
+                kind = "upper" if sign > 0 else "lower"
+                r, why = _read_side(pg, base, snapdir, kind, x, mid_y, kind)
+                if not r:
+                    continue
+                px = r["tooltip_price"]
+                pct = (px - spot) / spot * 100 if sign > 0 else (spot - px) / spot * 100
+                if 2.0 <= pct <= 5.0:
+                    return r, pct, why
+                # 百分比不合适就换更近/更远的档
+            return None, None, "no acceptable position"
 
-        def probe_up(offset_px: int):
-            x = min(int(cv_left + cv_w - 8), x_center + offset_px)
-            _hover_at(pg, x, mid_y)
-            p = snapdir / "2_upper.jpg"
-            pg.screenshot(str(p), quality=55)
-            cp = snapdir / "2_upper_crop.jpg"
-            _crop_tooltip(str(p), str(cp), x, mid_y)
-            r = _vlm_read(str(cp), "upper")
-            r["_full"] = str(p)
-            return r, str(cp)
+        up, up_pct, up_why = find_side(+1)
+        dn, dn_pct, dn_why = find_side(-1)
 
-        def probe_dn(offset_px: int):
-            x = max(int(cv_left + 8), x_center - offset_px)
-            _hover_at(pg, x, mid_y)
-            p = snapdir / "3_lower.jpg"
-            pg.screenshot(str(p), quality=55)
-            cp = snapdir / "3_lower_crop.jpg"
-            _crop_tooltip(str(p), str(cp), x, mid_y)
-            r = _vlm_read(str(cp), "lower")
-            r["_full"] = str(p)
-            return r, str(cp)
-
-        # 初始 offset：经验值 1% ≈ 110px，3% ≈ 330px
-        # 读失败时换几个偏移重试（tooltip 位置随光标变化，单点容易打偏）
-        off = 330
-        up, p_up = probe_up(off)
-        up_px = up.get("tooltip_price")
-        for _try in (380, 280, 430):
-            if up_px:
-                break
-            off = _try
-            up, p_up = probe_up(off)
-            up_px = up.get("tooltip_price")
-        if not up_px:
-            out["why"] = "upper read failed (tried 330/380/280/430)"
+        out["up_why"], out["dn_why"] = up_why, dn_why
+        if not up or not dn:
+            out["why"] = "read failed: up=%s(%s) dn=%s(%s)" % (
+                bool(up), up_why, bool(dn), dn_why)
             return out
 
-        # 校准：目标 3%，按实际百分比修正一次
-        def refine(px_actual, px_spot, offset):
-            pct = (px_actual - px_spot) / px_spot * 100
-            if pct <= 0:
-                return offset
-            return int(offset * 3.0 / pct)
-
-        new_off = refine(up_px, spot, off)
-        if abs(new_off - off) > 12:
-            off = max(120, min(520, new_off))
-            up, p_up = probe_up(off)
-            up_px = up.get("tooltip_price")
-
-        dn, p_dn = probe_dn(off)
-        dn_px = dn.get("tooltip_price")
-        # 下方累计值偶尔漏读 -> 换个偏移再试一次
-        if not dn.get("cumulative_long_m"):
-            dn2, p_dn2 = probe_dn(max(200, off - 60))
-            if dn2.get("cumulative_long_m"):
-                dn, p_dn = dn2, p_dn2
-                dn_px = dn2.get("tooltip_price")
-            elif not dn.get("cumulative_long_m"):
-                # 再换一个方向
-                dn3, p_dn3 = probe_dn(off + 60)
-                if dn3.get("cumulative_long_m"):
-                    dn, p_dn = dn3, p_dn3
-                    dn_px = dn3.get("tooltip_price")
-
-        if not up_px or not dn_px:
-            out["why"] = "tooltip read failed"
-            return out
-
-        # ---- 有效性校验（防止脏数据进入 L2 打分）----
-        _up_pct = (up_px - spot) / spot * 100
-        _dn_pct = (spot - dn_px) / spot * 100
-        _sm = up.get("cumulative_short_m")
-        _lm = dn.get("cumulative_long_m")
+        sm = up.get("cumulative_short_m")
+        lm = dn.get("cumulative_long_m")
+        out.update({
+            "ok": True,
+            "upper": {"px": up["tooltip_price"], "short_m": sm, "pct": round(up_pct, 2)},
+            "lower": {"px": dn["tooltip_price"], "long_m": lm, "pct": round(dn_pct, 2)},
+        })
+        # 校验
         _err = None
-        if not (2.0 <= _up_pct <= 5.0):
-            _err = "upper pct %.2f%% out of 2~5%%" % _up_pct
-        elif not (2.0 <= _dn_pct <= 5.0):
-            _err = "lower pct %.2f%% out of 2~5%%" % _dn_pct
-        elif abs(_up_pct - _dn_pct) > 1.8:
-            _err = "asymmetric window %.2f%% vs %.2f%%" % (_up_pct, _dn_pct)
-        elif not _sm or not _lm or _sm <= 0 or _lm <= 0:
-            _err = "cumulative missing short=%s long=%s" % (_sm, _lm)
+        if not sm or not lm or sm <= 0 or lm <= 0:
+            _err = "cumulative missing short=%s long=%s" % (sm, lm)
+        elif abs(up_pct - dn_pct) > 1.8:
+            _err = "asymmetric %.2f%% vs %.2f%%" % (up_pct, dn_pct)
         else:
-            _r = _sm / _lm
+            _r = sm / lm
             if not (0.2 <= _r <= 5.0):
                 _err = "R=%.2f implausible" % _r
         if _err:
+            out["ok"] = False
             out["why"] = "validation failed: " + _err
-            out["raw"] = {"up_pct": round(_up_pct, 2), "dn_pct": round(_dn_pct, 2),
-                          "short_m": _sm, "long_m": _lm}
-            return out
-
-        out.update({
-            "ok": True,
-            "upper": {"px": up_px, "short_m": up.get("cumulative_short_m"),
-                      "pct": round((up_px - spot) / spot * 100, 2)},
-            "lower": {"px": dn_px, "long_m": dn.get("cumulative_long_m"),
-                      "pct": round((spot - dn_px) / spot * 100, 2)},
-        })
-        out["shots"] = [str(p_base), p_up, p_dn]
         return out
     finally:
         pg.close()
