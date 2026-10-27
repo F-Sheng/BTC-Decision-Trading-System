@@ -24,7 +24,10 @@ from core.utils import CST, LOG_DIR, ROOT, read_json, safe_div
 BG, PANEL, PANEL2 = (13, 17, 23), (22, 27, 34), (27, 32, 39)
 BAND = (38, 31, 20)
 LINE, LINE2 = (44, 50, 58), (62, 70, 80)
-FG, MUTED, DIM = (235, 241, 247), (152, 162, 174), (110, 120, 132)
+FG, MUTED, DIM = (240, 245, 250), (175, 187, 201), (132, 144, 158)
+WHITE_TXT = (240, 245, 250)
+GOLD = (232, 184, 75)
+GOLD2 = (245, 205, 110)
 GREEN, GREEN2 = (74, 222, 100), (129, 199, 132)
 RED, RED2 = (255, 96, 84), (255, 138, 128)
 AMBER, BLUE, PURPLE, CYAN = (245, 180, 70), (105, 185, 250), (205, 158, 255), (85, 212, 202)
@@ -293,7 +296,7 @@ def render(D):
             d.rounded_rectangle([x0, yy, x0 + cwid, yy + hgt], radius=12, fill=PANEL)
             d.rounded_rectangle([x0, yy, x0 + cwid, yy + hgt], radius=12, outline=LINE, width=1)
             d.rounded_rectangle([x0 + 1, yy + 16, x0 + 6, yy + hgt - 16], radius=3, fill=colr)
-            d.text((x0 + 18, yy + 11), name, font=f_lt, fill=BLUE)
+            d.text((x0 + 18, yy + 11), name, font=f_lt, fill=(150, 205, 250))
             tw = d.textlength(label, font=f_bd)
             bx = x0 + cwid - tw - 30
             d.rounded_rectangle([bx, yy + 10, x0 + cwid - 14, yy + 38], radius=8,
@@ -301,7 +304,7 @@ def render(D):
             d.text((bx + 8, yy + 13), label, font=f_bd, fill=colr)
             for k, txt in enumerate(rows):
                 d.text((x0 + 18, yy + 44 + k * 25), clip(d, txt, f_m, cwid - 30),
-                       font=f_m, fill=FG if k == 0 else MUTED)
+                       font=f_m, fill=FG if k == 0 else (196, 207, 220))
             yy += hgt + 10
         ends.append(yy - 10)
 
@@ -447,10 +450,10 @@ def render(D):
                                 radius=3, fill=_accent)
             cells = [
                 ("", side_cn(pos.side), _accent),
-                ("保证金", f"{_margin:,.0f}", "#F0C46A"),
-                ("实际持仓", f"{_notional:,.0f}", FG),
-                ("开仓价", f"{pos.entry:,.1f}", FG),
-                ("现价", f"{price:,.1f}", FG),
+                ("保证金", f"{_margin:,.0f}", GOLD2),
+                ("实际持仓", f"{_notional:,.0f}", GOLD),
+                ("开仓价", f"{pos.entry:,.1f}", GOLD),
+                ("现价", f"{price:,.1f}", GOLD),
                 ("本仓盈亏", f"{_pnl_usd:+,.0f} U", _pnl_col),
                 ("盈利率", f"{_pnl_pct*100:+.2f}%", _pnl_col),
             ]
@@ -462,10 +465,12 @@ def render(D):
                                     radius=8, fill=(52, 42, 26))
                 if k:
                     _kl = {"保证金": f"保证金·{_lev:g}x"}.get(k, k)
-                    d.text((x + 10, _y + 4), _kl, font=f(11), fill=MUTED)
-                    d.text((x + 10, _y + 19), clip(d, v, _fval, cw - 16), font=_fval, fill=col)
+                    d.text((x + 10, _y + 4), _kl, font=f(11, True), fill=WHITE_TXT)
+                    d.text((x + 10, _y + 19), clip(d, v, _fval, cw - 16),
+                           font=_fval, fill=col)
                 else:
-                    d.text((x + 10, _y + 11), clip(d, v, _fval, cw - 16), font=_fval, fill=col)
+                    d.text((x + 10, _y + 11), clip(d, v, _fval, cw - 16),
+                           font=_fval, fill=col)
 
             # 止盈 / 止损 方框（上止盈、下止损）
             _bx = W - M - 22 - _boxw
@@ -475,11 +480,11 @@ def render(D):
             _half = (_rowh - 16) / 2
             _fs = f(13) if _dual else f(14)
             _fv = f(19, True) if _dual else f(23, True)
-            d.text((_bx + 12, _y + 5), "止盈", font=_fs, fill=GREEN)
-            d.text((_bx + _boxw - 12 - d.textlength(f"{_tp:,.0f}", font=_fv), _y + 4),
+            d.text((_bx + 12, _y + 5), "止盈", font=f(12, True), fill=(160, 240, 185))
+            d.text((_bx + _boxw - 18 - d.textlength(f"{_tp:,.0f}", font=_fv), _y + 4),
                    f"{_tp:,.0f}", font=_fv, fill=GREEN)
-            d.text((_bx + 12, _y + 4 + _half), "止损", font=_fs, fill=RED)
-            d.text((_bx + _boxw - 12 - d.textlength(f"{pos.stop:,.0f}", font=_fv), _y + 3 + _half),
+            d.text((_bx + 12, _y + 4 + _half), "止损", font=f(12, True), fill=(255, 170, 160))
+            d.text((_bx + _boxw - 18 - d.textlength(f"{pos.stop:,.0f}", font=_fv), _y + 3 + _half),
                    f"{pos.stop:,.0f}", font=_fv, fill=RED)
             _y += _rowh
 
