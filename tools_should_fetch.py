@@ -53,6 +53,52 @@ def _now():
     return datetime.now(CST)
 
 
+def _scan_news_file(path, label, window_min=NEWS_WINDOW_MIN, thresh=NEWS_HIGH_SCORE):
+    """扫描某个 news 日志文件，返回最近 window_min 分钟内权重>=thresh 的最新一条"""
+    if not path.exists():
+        return None, label + ' 文件不存在'
+    import json as _json
+    from datetime import datetime as _dt, timedelta as _td
+    cutoff = (_now() - _td(minutes=window_min)).timestamp()
+    best = None
+    try:
+        lines = path.read_text(encoding='utf-8').splitlines()[-400:]
+    except Exception as e:
+        return None, label + ' 读取失败: %s' % e
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            o = _json.loads(line)
+        except Exception:
+            continue
+        ts = o.get('ts') or o.get('time') or o.get('t') or 0
+        if isinstance(ts, str):
+            _ok = False
+            for _fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M',
+                         '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M'):
+                try:
+                    ts = _dt.strptime(ts[:19], _fmt).replace(tzinfo=CST).timestamp()
+                    _ok = True
+                    break
+                except Exception:
+                    continue
+            if not _ok:
+                continue
+        elif ts > 1e11:
+            ts = ts / 1000
+        if ts < cutoff:
+            continue
+        sc = int(o.get('score') or o.get('weight') or 0)
+        if sc >= thresh:
+            if best is None or sc > best[0] or (sc == best[0] and ts > best[2]):
+                best = (sc, (o.get('txt') or o.get('text') or o.get('title') or '')[:60], ts)
+    if best:
+        t = _dt.fromtimestamp(best[2], CST).strftime('%H:%M')
+        return True, '%s %s 权重%d: %s' % (label, t, best[0], best[1])
+    return False, '%s 最近%d分钟无权重>=%d' % (label, window_min, thresh)
+
+
 def r_news():
     """金十最近 NEWS_WINDOW_MIN 分钟是否有高权重新闻"""
     p = ROOT / "data" / "news_log.jsonl"
@@ -91,7 +137,8 @@ def r_news():
                 continue
             sc = int(o.get("score") or o.get("weight") or 0)
             if sc >= NEWS_HIGH_SCORE:
-                if best is None or sc > best[0]:
+                # 同分时取最新那条（原来只比分数，导致一直报最早的一条）
+                if best is None or sc > best[0] or (sc == best[0] and ts > best[2]):
                     best = (sc, (o.get("txt") or o.get("text") or o.get("title") or "")[:60], ts)
     except Exception as e:
         return None, "news_log 读取失败: %s" % e
@@ -99,6 +146,11 @@ def r_news():
         t = datetime.fromtimestamp(best[2], CST).strftime("%H:%M")
         return True, "金十 %s 权重%d: %s" % (t, best[0], best[1])
     return False, "最近 %d 分钟无权重>=%d 的新闻" % (NEWS_WINDOW_MIN, NEWS_HIGH_SCORE)
+
+
+def r_odaily():
+    """Odaily 星球日报快讯（专注币圈，补充金十的宏观视角）"""
+    return _scan_news_file(ROOT / "data" / "odaily_log.jsonl", "Odaily")
 
 
 def r_last_snapshot():
@@ -300,6 +352,13 @@ def main():
     checks["news"] = msg
     if ok:
         reasons.append(msg)
+        big_event = True
+
+    # 1b. Odaily 币圈快讯
+    ok2, msg2 = r_odaily()
+    checks["odaily"] = msg2
+    if ok2:
+        reasons.append(msg2)
         big_event = True
 
     # 2. 价格变动
