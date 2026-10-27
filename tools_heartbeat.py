@@ -16,6 +16,7 @@ DSH 定时任务是固定间隔，所以用「2 分钟 tick + 内部节流」模
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import time
@@ -65,12 +66,25 @@ def l0() -> dict:
     ok2, txt2 = run([PY, "tools_jin10.py"], timeout=60)
     out["jin10_ok"] = ok2
     if ok2:
-        out["news_high"] = "★★" in txt2
-        # 找最高权重那条
+        # 2026-10-28 优化：原来只要窗口内有★★就触发 L1，导致同一条新闻
+        # 会被反复触发（实测连续 5 轮都是同一条停火消息）。
+        # 改为「只有出现此前未见过的★★ 才算 news_high」。
+        tops = []
         for ln in txt2.splitlines():
-            if "★★" in ln:
-                out["top_news"] = ln.strip()[:120]
-                break
+            t = ln.strip()
+            # 排除统计行「（输出 N 条：★★x / ★y ...）」和分隔线
+            if "★★" not in t or "输出" in t or t.startswith("==="):
+                continue
+            tops.append(re.sub(r"\\s+", " ", t)[:100])
+        out["top_news"] = tops[0] if tops else None
+        prev = set(load_state().get("seen_news", []))
+        fresh = [t for t in tops if t not in prev]
+        out["news_high"] = bool(fresh)
+        out["fresh_news"] = fresh[:2]
+        if fresh:
+            st = load_state()
+            st["seen_news"] = (list(prev) + fresh)[-60:]
+            save_state(st)
     return out
 
 
@@ -165,7 +179,11 @@ def main():
         result["tiers"].append(r)
         st["last_L2"] = time.time()
 
-    save_state(st)
+    # 重新读一次再合并，避免用开头的旧快照覆盖 l0() 写入的 seen_news
+    fresh_state = load_state()
+    fresh_state["last_L1"] = st.get("last_L1", fresh_state.get("last_L1", 0))
+    fresh_state["last_L2"] = st.get("last_L2", fresh_state.get("last_L2", 0))
+    save_state(fresh_state)
     print(json.dumps(result, ensure_ascii=False, indent=1))
     return 0
 
