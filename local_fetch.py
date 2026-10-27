@@ -273,9 +273,32 @@ def fetch_map() -> dict:
         pg.goto(MAP_URL, wait=4.0)
         _hard_reload(pg, 6.0)
 
-        info = json.loads(pg.eval_js(JS_MAP_READY) or "{}")
+        # canvas 未渲染时（VPN 抖动/慢加载）重试，最多 3 次
+        info = {}
+        for _attempt in range(3):
+            info = json.loads(pg.eval_js(JS_MAP_READY) or "{}")
+            if info.get("ok"):
+                break
+            time.sleep(3.5 + _attempt * 2)
+            if _attempt < 2:
+                try:
+                    _hard_reload(pg, 5.0 + _attempt * 2)
+                except Exception:
+                    pass
         if not info.get("ok"):
-            out["why"] = info.get("why", "map not ready")
+            out["why"] = "map not ready after 3 tries: %s" % info.get("why", "no canvas")
+            try:
+                esc = {
+                    "ts": datetime.now().strftime("%Y-%m-%dT%H:%M"),
+                    "why": out["why"],
+                    "hint": ("图表未渲染，非读数问题。多为网络抖动或 CoinGlass 慢加载；"
+                             "可下一轮重试，或人工打开 Chrome-自动化 确认页面正常。"),
+                    "action": "no_manual_value_available",
+                }
+                (ROOT / "data" / "map_escalation.json").write_text(
+                    json.dumps(esc, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
             return out
         cl, ct, cw, ch = info["left"], info["top"], info["w"], info["h"]
         mid_y = int(ct + ch * 0.45)
