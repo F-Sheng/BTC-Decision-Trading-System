@@ -421,46 +421,79 @@ def render(D):
 
     if _sides and hasattr(st, "get_pos"):
         _dual = len(_sides) > 1
-        _rowh = 58 if _dual else 82
-        _fval = f(19, True) if _dual else f(26, True)
-        _y = top + 46
+        _ctv = float(D['ct_val'])
+        _lev = float(cfg.get("leverage") or 10)
+        _rowh = 54 if _dual else 86
+        _fval = f(18, True) if _dual else f(25, True)
+        _y = top + 42
+        # 右侧止盈/止损独立方框
+        _boxw, _boxh = 236, (_rowh - 14) if _dual else 66
         for _sd in ("long", "short"):
             if _sd not in _sides:
                 continue
             pos = st.get_pos(_sd)
-            mvp = safe_div((price - pos.entry) if pos.side == "long" else (pos.entry - price),
-                           pos.entry)
+            _ctv = float(D['ct_val'])
+            # 保证金 = 名义 / 杠杆；名义 = 张数 × 合约面值 × 开仓价
+            _notional = pos.size * _ctv * pos.entry
+            _margin = _notional / _lev
+            _qty_btc = pos.size * _ctv
+            _pnl_usd = ((price - pos.entry) if pos.side == "long"
+                        else (pos.entry - price)) * _ctv * pos.size
+            _pnl_pct = _pnl_usd / _margin if _margin else 0.0
             _accent = GREEN if pos.side == "long" else RED
-            d.rounded_rectangle([M + 22, _y - 6, M + 30, _y + _rowh - 10],
+            _pnl_col = GREEN if _pnl_usd > 0 else (RED if _pnl_usd < 0 else FG)
+
+            d.rounded_rectangle([M + 22, _y - 4, M + 30, _y + _rowh - 20],
                                 radius=3, fill=_accent)
             cells = [
                 ("", side_cn(pos.side), _accent),
-                ("张数", f"{pos.size:.1f}", FG),
-                ("开仓", f"{pos.entry:,.1f}", FG),
+                ("保证金", f"{_margin:,.0f}", "#F0C46A"),
+                ("实际持仓", f"{_notional:,.0f}", FG),
+                ("开仓价", f"{pos.entry:,.1f}", FG),
                 ("现价", f"{price:,.1f}", FG),
-                ("浮动", f"{mvp*100:+.2f}%", GREEN if mvp > 0 else RED),
-                ("止损", f"{pos.stop:,.1f}", RED),
-                ("止盈首档", f"{pos.targets[0]:,.0f}" if pos.targets else "—", GREEN),
-                ("距止损", f"{abs(pos.stop-price)/price*100:.2f}%", MUTED),
-                ("模型", pos.model, PURPLE),
+                ("本仓盈亏", f"{_pnl_usd:+,.0f} U", _pnl_col),
+                ("盈利率", f"{_pnl_pct*100:+.2f}%", _pnl_col),
             ]
-            cw = (W - 2 * M - 60 - 8 * 8) / 9
+            _cw_total = W - 2 * M - 44 - _boxw - 14
+            cw = (_cw_total - 7 * 8) / len(cells)
             for i, (k, v, col) in enumerate(cells):
                 x = M + 36 + i * (cw + 8)
                 d.rounded_rectangle([x, _y, x + cw, _y + _rowh - 16],
                                     radius=8, fill=(52, 42, 26))
                 if k:
-                    d.text((x + 10, _y + 5), k, font=f(11), fill=MUTED)
-                    d.text((x + 10, _y + 20), clip(d, v, _fval, cw - 16), font=_fval, fill=col)
+                    _kl = {"保证金": f"保证金·{_lev:g}x"}.get(k, k)
+                    d.text((x + 10, _y + 4), _kl, font=f(11), fill=MUTED)
+                    d.text((x + 10, _y + 19), clip(d, v, _fval, cw - 16), font=_fval, fill=col)
                 else:
-                    d.text((x + 10, _y + 12), clip(d, v, _fval, cw - 16), font=_fval, fill=col)
+                    d.text((x + 10, _y + 11), clip(d, v, _fval, cw - 16), font=_fval, fill=col)
+
+            # 止盈 / 止损 方框（上止盈、下止损）
+            _bx = W - M - 22 - _boxw
+            d.rounded_rectangle([_bx, _y, _bx + _boxw, _y + _rowh - 16],
+                                radius=8, fill=(44, 36, 22), outline=AMBER, width=1)
+            _tp = pos.targets[0] if pos.targets else 0
+            _half = (_rowh - 16) / 2
+            _fs = f(13) if _dual else f(14)
+            _fv = f(19, True) if _dual else f(23, True)
+            d.text((_bx + 12, _y + 5), "止盈", font=_fs, fill=GREEN)
+            d.text((_bx + _boxw - 12 - d.textlength(f"{_tp:,.0f}", font=_fv), _y + 4),
+                   f"{_tp:,.0f}", font=_fv, fill=GREEN)
+            d.text((_bx + 12, _y + 4 + _half), "止损", font=_fs, fill=RED)
+            d.text((_bx + _boxw - 12 - d.textlength(f"{pos.stop:,.0f}", font=_fv), _y + 3 + _half),
+                   f"{pos.stop:,.0f}", font=_fv, fill=RED)
             _y += _rowh
 
         _tot = sum(st.get_pos(s_).size * D['ct_val'] * price for s_ in _sides)
-        line2 = (f"合计名义 {_tot:,.0f} USDT　｜　10 倍杠杆　｜　"
-                 f"双向持仓：多单博反弹、空单等止盈，各自止损独立执行")
+        _tot_margin = sum(st.get_pos(s_).size * D['ct_val'] * st.get_pos(s_).entry
+                          for s_ in _sides) / float(cfg.get("leverage") or 10)
+        _tot_pnl = sum(
+            ((price - st.get_pos(s_).entry) if s_ == "long"
+             else (st.get_pos(s_).entry - price)) * D['ct_val'] * st.get_pos(s_).size
+            for s_ in _sides)
+        line2 = (f"合计 保证金 {_tot_margin:,.0f} U　｜　名义 {_tot:,.0f} U　｜　"
+                 f"合计盈亏 {_tot_pnl:+,.0f} U　｜　{_lev:g}x 杠杆")
         d.text((M + 22, _y + 2), clip(d, line2, f(14), W - 2 * M - 44), font=f(14), fill=MUTED)
-        yb = _y + 26
+        yb = _y + 24
     else:
         d.rounded_rectangle([M + 22, top + 50, W - M - 22, top + 120], radius=10, fill=(52, 42, 26))
         d.text((M + 40, top + 72), "当前空仓，等待信号触发", font=f(24, True), fill=MUTED)
