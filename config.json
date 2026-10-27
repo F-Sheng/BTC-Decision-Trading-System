@@ -63,5 +63,13 @@
   "maker_offset_usd": 110,
   "maker_offset_step": -40,
   "counter_trend_trail_r": 0.3,
-  "maker_at_key": true
+  "maker_at_key": true,
+  "tp_safety_usd": 100.0,
+  "add_enabled": true,
+  "add_max_times": 2,
+  "add_size_mult": 0.4,
+  "add_min_gap_pct": 0.5,
+  "add_reject_pct": 0.35,
+  "add_risk_cap": 1.6,
+  "add_blackout_h": 1.0
 }

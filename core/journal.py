@@ -27,6 +27,12 @@ class Position:
     counter_trend: bool = False
     peak_pnl_pct: float = 0.0
     risk0: float = 0.0        # 开仓时的原始风险距离（止损被移动后仍保留）
+    # 2026-10-28 加仓逻辑所需
+    add_count: int = 0        # 已加仓次数
+    test_level: float = 0.0   # 最近测试过的关键位
+    test_ts: int = 0          # 测试时间（ms）
+    last_add_px: float = 0.0  # 上次加仓价格
+
 
     @property
     def is_open(self) -> bool:

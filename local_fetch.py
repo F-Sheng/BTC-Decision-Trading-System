@@ -572,9 +572,32 @@ def fetch_x(url: str, tier: str) -> list[dict]:
 def main():
     args = sys.argv[1:]
     do_map = "--no-map" not in args
+    x_only = "--x-only" in args
+    result = {"ts": now_ts(), "map": None, "lsr": None,
+              "x_pro": [], "x_retail": []}
+    if x_only:
+        do_map = False
+        print("=== X only 模式 ===")
+        for u, tier in ((X_PRO, "pro"), (X_RETAIL, "retail")):
+            try:
+                ps = fetch_x(u, tier)
+                print("  %s %d 条" % (tier, len(ps)))
+                result["x_" + tier] = ps
+            except Exception as e:
+                print("  %s 失败: %s" % (tier, e))
+        _posts = result["x_pro"] + result["x_retail"]
+        if _posts:
+            _xp = ROOT / "data" / "x_posts.json"
+            _payload = [{"tier": q["tier"], "user": q["user"] or "unknown",
+                         "age": q["ts"][:16] if q["ts"] else "",
+                         "likes": q["likes"], "views": q["views"],
+                         "text": q["text"][:220], "text_cn": ""} for q in _posts]
+            json.dump({"captured_at": int(time.time() * 1000),
+                       "note": "local_fetch.py --x-only", "posts": _payload},
+                      open(_xp, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+            print("  -> %s (%d 条)" % (_xp, len(_payload)))
+        return
     do_x = "--no-x" not in args
-
-    result = {"ts": now_ts(), "map": None, "lsr": None, "x_pro": [], "x_retail": []}
 
     if do_map:
         print("=== 清算地图 ===")
