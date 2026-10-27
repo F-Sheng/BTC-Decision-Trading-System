@@ -75,13 +75,25 @@ class CGView:
         return self.cex_short_usd / self.cex_long_usd
 
     def summary(self) -> str:
-        return (f"CG[{'鲜' if self.fresh else '旧'}{self.age_min:.0f}m] "
-                f"BN空头累计{self.short_cum_next/1e6:.0f}M@{self.short_trigger_next:,.0f} "
-                f"下方多头{self.long_cum_below/1e6:.0f}M R={self.r_ratio:.1f} "
-                f"全CEX {self.cex_short_usd/1e8:.2f}亿/{self.cex_long_usd/1e8:.2f}亿 "
-                f"鲸鱼偏{self.whale_bias_binance or self.whale_pos_binance:.2f} {self.smart_money}"
-                if self.fresh else
-                f"CG 无新鲜数据（{self.age_min:.0f}m 前）")
+        # 2026-10-28：清算地图数据缺失时（r_ratio=None）原代码会格式化 None 抛 TypeError，
+        # 导致整轮 cycle 崩掉。这里全部做 None 安全处理。
+        def _f(v, nd=0):
+            return ("." + str(nd) + "f") and (format(v, ",.%df" % nd) if v is not None else "—")
+        if not self.fresh:
+            return "CG 无新鲜数据（%.0fm 前）" % (self.age_min or 0)
+        try:
+            _short = self.short_cum_next / 1e6 if self.short_cum_next else None
+            _long = self.long_cum_below / 1e6 if self.long_cum_below else None
+            _r = self.r_ratio
+            _wb = self.whale_bias_binance or self.whale_pos_binance
+            _cs = self.cex_short_usd / 1e8 if self.cex_short_usd else None
+            _cl = self.cex_long_usd / 1e8 if self.cex_long_usd else None
+            return ("CG[鲜%.0fm] BN空头累计%sM@%s 下方多头%sM R=%s 全CEX %s亿/%s亿 鲸鱼偏%s %s"
+                    % (self.age_min or 0, _f(_short), _f(self.short_trigger_next),
+                       _f(_long), (_f(_r, 2) if _r is not None else "不可用"),
+                       _f(_cs, 2), _f(_cl, 2), _f(_wb, 2), self.smart_money or ""))
+        except Exception:
+            return "CG[鲜%.0fm] 数据不完整" % (self.age_min or 0)
 
 
 def load() -> CGView:
