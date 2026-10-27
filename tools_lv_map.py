@@ -136,8 +136,10 @@ def data_check() -> int:
         ok("LV liqmap", st.get("ok"),
            "R=%.2f age=%.0fs bins=%d" % (st.get("r") or 0,
                                          st.get("age_s") or 0, st.get("bins") or 0))
-        ok("LV liqmap 新鲜度", (st.get("age_s") or 999) < 600,
-           "%.0f 秒前" % (st.get("age_s") or -1))
+        # age_s 可能是 0（最新鲜），而 0 or 999 = 999 会误判过期，必须显式判 None
+        _age = st.get("age_s")
+        _age = 99999.0 if _age is None else float(_age)
+        ok("LV liqmap 新鲜度", _age < 600, "%.0f 秒前" % _age)
         # 注：旧版的「窗口对称」检查来自截图时代（手动 hover 会偏到 +3.26%/-4.48%）。
         # 现在 API 直接按 ±3% 索引取 bin，天然对称，改成检查「实际窗口是否落在 2.7~3.3%」
         _upw, _dnw = st.get("up_pct") or 0, st.get("dn_pct") or 0
