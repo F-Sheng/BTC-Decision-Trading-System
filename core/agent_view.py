@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FILE = ROOT / "data" / "agent_view.json"
 SHADOW_LOG = ROOT / "data" / "agent_view_log.jsonl"
 
-EXPIRE_SEC = 90 * 60          # 超过 90 分钟视为无意见
+EXPIRE_SEC = 150 * 60         # 2026-10-27: 90->150 分钟，配合自适应采样(平静期1小时一轮)
 SIZE_MULT_MIN = 0.0
 SIZE_MULT_MAX = 1.0
 
