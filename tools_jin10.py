@@ -36,7 +36,6 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
 
 # 分级权重：越高越重要（对 BTC 定价影响越大）
 WEIGHTS = {
-    **EXTRA_KEYWORDS,
     # 地缘战争 —— 油价/避险，最高权重
     "战争": 10, "停火": 10, "停战": 10, "和平": 9, "结束冲突": 9,
     "伊朗": 8, "哈梅内伊": 9, "以色列": 8, "中东": 7, "导弹": 8,
@@ -72,6 +71,11 @@ EXTRA_KEYWORDS = {
     "非农": 8, "CPI": 8, "PCE": 8, "GDP": 6,
     "辞职": 6, "弹劾": 7, "战时": 7, "紧急状态": 7,
 }
+
+# 合并：只补 WEIGHTS 里没有的键，绝不用低权重覆盖已有的高权重
+# （EXTRA 里 "停火"=9 而 WEIGHTS 里 "停火"=10，直接 update 会把权重降下来）
+for _k, _v in EXTRA_KEYWORDS.items():
+    WEIGHTS.setdefault(_k, _v)
 
 NOISE_WORDS = ["辟谣", "短剧", "ST", "*ST", "个股", "涨停", "跌停",
                "盘初上涨", "盘初下跌", "黄金T+D", "白银T+D", "新闻联播"]
@@ -161,9 +165,15 @@ def main():
         if t is None or t < cutoff:
             continue
         sc, hit = score(txt)
+        # 2026-10-27 用户提示：金十自带 important 字段（官方「爆」标记）
+        # 实测确认可用！23:49「泽连斯基可能访问莫斯科」就是 important=1
+        imp = int(it.get("important") or 0)
+        if imp >= 1:
+            sc = max(sc, 9) + min(imp, 3)   # 官方标记优先于关键词
+            hit = ["★金十重要"] + hit
         noisy = any(n in txt for n in NOISE_WORDS)
         rows.append({"t": t, "txt": txt, "score": sc, "hit": hit,
-                     "noisy": noisy})
+                     "noisy": noisy, "imp": imp})
 
     # 存档（去重）
     seen = set()
@@ -181,7 +191,7 @@ def main():
                 f.write(json.dumps({
                     "ts": r["t"].strftime("%Y-%m-%d %H:%M"),
                     "txt": r["txt"], "score": r["score"],
-                    "hit": r["hit"]}, ensure_ascii=False) + "\n")
+                    "hit": r["hit"], "important": r.get("imp", 0)}, ensure_ascii=False) + "\n")
 
     print(f"=== 金十 · 最近 {hours:g} 小时 · 共 {len(rows)} 条 "
           f"（新增存档 {len(new_rows)} 条）===")
