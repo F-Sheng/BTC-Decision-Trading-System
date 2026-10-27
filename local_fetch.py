@@ -298,10 +298,11 @@ def fetch_map() -> dict:
             return out
         out["spot"] = spot
 
-        # 2) 上方 ~3%：从画布 55% 处向右找，逐步加距离
-        def find_side(sign: int):
-            """sign=+1 上侧, -1 下侧"""
-            for frac in (0.62, 0.72, 0.82, 0.92, 0.50, 0.42):
+        # 2) 上下各取多个候选，最后选「最对称的一对」
+        def candidates(sign: int):
+            """sign=+1 上侧, -1 下侧。返回 [(result, pct, why), ...]"""
+            outl = []
+            for frac in (0.62, 0.72, 0.55, 0.82, 0.68, 0.78, 0.92, 0.50):
                 x = int(cl + cw * frac) if sign > 0 else int(cl + cw * (1 - frac))
                 x = max(int(cl + 10), min(int(cl + cw - 10), x))
                 kind = "upper" if sign > 0 else "lower"
@@ -311,17 +312,50 @@ def fetch_map() -> dict:
                 px = r["tooltip_price"]
                 pct = (px - spot) / spot * 100 if sign > 0 else (spot - px) / spot * 100
                 if 2.0 <= pct <= 5.0:
-                    return r, pct, why
-                # 百分比不合适就换更近/更远的档
-            return None, None, "no acceptable position"
+                    outl.append((r, pct, why))
+            return outl
 
-        up, up_pct, up_why = find_side(+1)
-        dn, dn_pct, dn_why = find_side(-1)
+        up_c = candidates(+1)
+        dn_c = candidates(-1)
+
+        # 选 |上侧pct - 下侧pct| 最小的一对，避免窗口不对称
+        up = dn = None
+        up_pct = dn_pct = None
+        up_why = dn_why = "no acceptable position"
+        best = 99.0
+        for ur, up_, uw in up_c:
+            for dr, dp_, dw in dn_c:
+                gap = abs(up_ - dp_)
+                if gap < best:
+                    best, up, up_pct, up_why = gap, ur, up_, uw
+                    dn, dn_pct, dn_why = dr, dp_, dw
+        if up is not None:
+            up_why = "%s | gap=%.2fpt" % (up_why, best)
+            dn_why = "%s | gap=%.2fpt" % (dn_why, best)
 
         out["up_why"], out["dn_why"] = up_why, dn_why
         if not up or not dn:
-            out["why"] = "read failed: up=%s(%s) dn=%s(%s)" % (
+            why = "read failed: up=%s(%s) dn=%s(%s)" % (
                 bool(up), up_why, bool(dn), dn_why)
+            out["why"] = why
+            # 升级给 Agent：保存裁剪图路径，由 Agent 亲自看图定数（不进入长期上下文）
+            try:
+                esc = {
+                    "ts": datetime.now().strftime("%Y-%m-%dT%H:%M"),
+                    "spot": spot,
+                    "why": why,
+                    "crops": sorted(str(x) for x in snapdir.glob("crop_*.jpg")),
+                    "hovr": sorted(str(x) for x in snapdir.glob("hover_*.jpg")),
+                    "base": str(base),
+                    "action": ("请 Agent 用 read_image 看对应裁剪图，确认 "
+                               "tooltip 价格与累计值，然后执行 "
+                               "python tools_write_manual_map.py --spot <> "
+                               "--up-px <> --up-short-m <> --dn-px <> --dn-long-m <>"),
+                }
+                (ROOT / "data" / "map_escalation.json").write_text(
+                    json.dumps(esc, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
             return out
 
         sm = up.get("cumulative_short_m")
@@ -344,6 +378,28 @@ def fetch_map() -> dict:
         if _err:
             out["ok"] = False
             out["why"] = "validation failed: " + _err
+            try:
+                esc = {
+                    "ts": datetime.now().strftime("%Y-%m-%dT%H:%M"),
+                    "spot": spot,
+                    "why": out["why"],
+                    "raw": {"up": out.get("upper"), "lower": out.get("lower")},
+                    "crops": sorted(str(x) for x in snapdir.glob("crop_*.jpg")),
+                    "action": ("请 Agent 用 read_image 核对裁剪图，然后执行 "
+                               "tools_write_manual_map.py 人工写数"),
+                }
+                (ROOT / "data" / "map_escalation.json").write_text(
+                    json.dumps(esc, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        else:
+            # 成功则清除升级标记
+            f = ROOT / "data" / "map_escalation.json"
+            if f.exists():
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
         return out
     finally:
         pg.close()

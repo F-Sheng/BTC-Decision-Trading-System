@@ -117,7 +117,7 @@ def score(txt):
 
 def main():
     args = sys.argv[1:]
-    hours = 6
+    hours = 4
     show_all = "--all" in args
     if "--hours" in args:
         i = args.index("--hours")
