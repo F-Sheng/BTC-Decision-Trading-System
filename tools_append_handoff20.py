@@ -3,7 +3,7 @@ import os
 
 p = r"D:\DP workspace\btc_system\HANDOFF.md"
 
-sec = """
+sec = r"""
 ---
 
 ## 20. 2026-10-27 夜间大改 · 最终交接（新会话从这里读）
