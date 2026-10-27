@@ -36,6 +36,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
 
 # 分级权重：越高越重要（对 BTC 定价影响越大）
 WEIGHTS = {
+    **EXTRA_KEYWORDS,
     # 地缘战争 —— 油价/避险，最高权重
     "战争": 10, "停火": 10, "停战": 10, "和平": 9, "结束冲突": 9,
     "伊朗": 8, "哈梅内伊": 9, "以色列": 8, "中东": 7, "导弹": 8,
@@ -59,6 +60,18 @@ SOFT_WORDS = ["考虑", "必须", "寻求", "呼吁", "希望", "愿意", "表�
 # 实质类词：真正的进展 -> 加权
 HARD_WORDS = ["签署", "达成协议", "停火生效", "解除制裁", "正式", "宣布停火",
               "撤军", "重开", "开放霍尔木兹", "协议生效"]
+
+# 2026-10-27 补漏：原来「击中/袭击/无人机/炮击」不在表里，
+# 导致「俄罗斯称在黑海击中一艘干散货船」得分 0 被排到最后。
+EXTRA_KEYWORDS = {
+    "击中": 7, "袭击": 7, "无人机": 6, "炮击": 7, "空袭": 7,
+    "黑海": 7, "敖德萨": 7, "哈尔科夫": 7, "基辅": 7, "顿巴斯": 6,
+    "委内瑞拉": 6, "石油": 6, "天然气": 6, "海峡": 7,
+    "停火": 9, "和平谈判": 8, "谈判": 6, "斡旋": 6,
+    "加息": 8, "降息": 8, "缩表": 8, "收益率": 6, "国债": 4,
+    "非农": 8, "CPI": 8, "PCE": 8, "GDP": 6,
+    "辞职": 6, "弹劾": 7, "战时": 7, "紧急状态": 7,
+}
 
 NOISE_WORDS = ["辟谣", "短剧", "ST", "*ST", "个股", "涨停", "跌停",
                "盘初上涨", "盘初下跌", "黄金T+D", "白银T+D", "新闻联播"]
@@ -117,6 +130,7 @@ def score(txt):
 
 def main():
     args = sys.argv[1:]
+    limit = 26   # 2026-10-27: 默认输出 26 条（原来只输出关键词命中的少量，导致漏重大消息）
     hours = 4
     show_all = "--all" in args
     if "--hours" in args:
@@ -133,8 +147,16 @@ def main():
     rows = []
     for it in items:
         txt = clean(it)
+        # 2026-10-27：原来这里 len<10 直接丢弃，把 type=1 的经济数据快讯
+        # （国债竞拍、初请失业金等）全丢了。改为保留，用占位说明。
         if len(txt) < 10:
-            continue
+            _d = it.get("data") or {}
+            _name = str(_d.get("name") or _d.get("title") or "").strip()
+            _val = str(_d.get("value") or _d.get("actual") or "").strip()
+            if _name or _val:
+                txt = "[数据] " + _name + (" = " + _val if _val else "")
+            else:
+                continue
         t = parse_time(it)
         if t is None or t < cutoff:
             continue
@@ -169,16 +191,35 @@ def main():
             print(f"  {r['t']:%m-%d %H:%M} [{r['score']:2d}] {r['txt'][:100]}")
         return
 
-    # 只输出有命中的，按 重要度↓ 时间↓ 排序
-    picked = [r for r in rows if r["score"] > 0 and not r["noisy"]]
+    # 2026-10-27 修正（用户指出「过滤太多」）：
+    # 原来只输出关键词命中的条目，导致「俄罗斯称在黑海击中一艘干散货船」
+    # 「奥列什基停火持续至11月1日」这类重大消息因不含预设关键词被整条丢弃。
+    # 现在：只过滤真正的广告噪音（直播/点击观看），其余全部输出，按重要度排序。
+    picked = [r for r in rows if not r["noisy"]]
     if not picked:
-        print("  本时段无重要新闻（关键词未命中）")
-        return
+        picked = rows          # 全是噪音也不许空手而归
+    # 数据类去重：同一条会同时出现「文字版」和「[数据] 版」，只留一个
+    _seen_key = set()
+    _dedup = []
+    for r in picked:
+        k = (r["t"].strftime("%H:%M"), r["txt"][:28])
+        if k in _seen_key:
+            continue
+        _seen_key.add(k)
+        _dedup.append(r)
+    picked = _dedup
+
     picked.sort(key=lambda x: (-x["score"], -x["t"].timestamp()))
+    picked = picked[:limit]
+
+    n_high = sum(1 for r in picked if r["score"] >= 9)
+    n_mid = sum(1 for r in picked if 7 <= r["score"] < 9)
+    print(f"  （输出 {len(picked)} 条：★★{n_high} / ★{n_mid} / 其余 {len(picked)-n_high-n_mid}）")
     for r in picked:
         star = "★★" if r["score"] >= 9 else ("★" if r["score"] >= 7 else "·")
-        print(f"  {star} {r['t']:%H:%M} [{r['score']:2d}] {r['txt'][:110]}")
-        print(f"        关键词: {'/'.join(r['hit'][:5])}")
+        print(f"  {star} {r['t']:%H:%M} [{r['score']:2d}] {r['txt'][:130]}")
+        if r["hit"]:
+            print(f"        关键词: {'/'.join(r['hit'][:6])}")
 
 
 if __name__ == "__main__":

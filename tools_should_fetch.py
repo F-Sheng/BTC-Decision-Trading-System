@@ -71,10 +71,19 @@ def r_news():
             ts = o.get("ts") or o.get("time") or o.get("t") or 0
             # 可能是毫秒、秒、或字符串
             if isinstance(ts, str):
-                try:
-                    ts = datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S").replace(
-                        tzinfo=CST).timestamp()
-                except Exception:
+                # news_log 里存的是 "YYYY-MM-DD HH:MM"（16 字符），
+                # 原来只按 "%Y-%m-%d %H:%M:%S" 解析会全部失败 -> 规则1永远不触发
+                _ok = False
+                for _fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+                             "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+                    try:
+                        ts = datetime.strptime(ts[:19], _fmt).replace(
+                            tzinfo=CST).timestamp()
+                        _ok = True
+                        break
+                    except Exception:
+                        continue
+                if not _ok:
                     continue
             elif ts > 1e11:
                 ts = ts / 1000
@@ -83,7 +92,7 @@ def r_news():
             sc = int(o.get("score") or o.get("weight") or 0)
             if sc >= NEWS_HIGH_SCORE:
                 if best is None or sc > best[0]:
-                    best = (sc, (o.get("text") or o.get("title") or "")[:60], ts)
+                    best = (sc, (o.get("txt") or o.get("text") or o.get("title") or "")[:60], ts)
     except Exception as e:
         return None, "news_log 读取失败: %s" % e
     if best:
@@ -183,6 +192,72 @@ def r_calendar():
     return False, "不在重要日历窗口内"
 
 
+
+LIQ_WATCH = ROOT / "data" / "liq_watch.json"
+LIQ_CHANGE_PCT = 30.0     # 上方/下方清算总量相对上次变动超过该值 -> 触发
+OI_CHANGE_PCT = 5.0       # OI 变动超过该值 -> 触发
+
+
+def r_liquidation_shift():
+    """从机器人日志读 L2[PROXY]，检测清算总量 / OI 突变。
+
+    为什么这样做（用户 2026-10-27 提问）：
+      平静期不截 CoinGlass 图，那币圈发生清算大事怎么发现？
+      答案：机器人每 60 秒算一次自己的 L2[PROXY]（含上3%/下3%清算总量、OI、
+      funding、多空比），已经写在日志里。读日志零成本，不需要浏览器。
+    """
+    import re
+
+    logs = sorted((ROOT / "logs").glob("btc-*.log"))
+    if not logs:
+        return False, "无日志"
+    latest = logs[-1]
+    try:
+        tail = latest.read_text(encoding="utf-8", errors="ignore").splitlines()[-400:]
+    except Exception as e:
+        return None, "日志读取失败: %s" % e
+
+    pat = re.compile(
+        r"L2\[PROXY\]\s+R=([\d.]+)\s+上3%=([\d.]+)M\s+下3%=([\d.]+)M.*?OI=([\d,]+)BTC")
+    cur = None
+    for line in reversed(tail):
+        m = pat.search(line)
+        if m:
+            cur = {"r": float(m.group(1)),
+                   "up_m": float(m.group(2)),
+                   "dn_m": float(m.group(3)),
+                   "oi": float(m.group(4).replace(",", ""))}
+            break
+    if not cur:
+        return None, "日志里没找到 L2[PROXY]"
+
+    prev = None
+    if LIQ_WATCH.exists():
+        try:
+            prev = json.loads(LIQ_WATCH.read_text(encoding="utf-8"))
+        except Exception:
+            prev = None
+    try:
+        LIQ_WATCH.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+    if not prev or not prev.get("up_m"):
+        return False, "首次记录清算基准 R=%.2f 上%.0fM 下%.0fM" % (
+            cur["r"], cur["up_m"], cur["dn_m"])
+
+    du = abs(cur["up_m"] - prev["up_m"]) / prev["up_m"] * 100
+    dd = abs(cur["dn_m"] - prev["dn_m"]) / prev["dn_m"] * 100
+    do = abs(cur["oi"] - prev["oi"]) / prev["oi"] * 100 if prev.get("oi") else 0
+    msg = ("清算变化 上%.0f%% 下%.0f%% OI%.1f%%（R %.2f→%.2f）"
+           % (du, dd, do, prev["r"], cur["r"]))
+    if du > LIQ_CHANGE_PCT or dd > LIQ_CHANGE_PCT:
+        return True, "清算突变 " + msg
+    if do > OI_CHANGE_PCT:
+        return True, "OI 突变 " + msg
+    return False, msg
+
+
 def main():
     reasons = []       # 触发原因
     checks = {}        # 全部检查明细
@@ -249,6 +324,13 @@ def main():
     # 7. 日历
     ok, msg = r_calendar()
     checks["calendar"] = msg
+    if ok:
+        reasons.append(msg)
+        big_event = True
+
+    # 8. 清算 / OI 突变（从机器人日志读，零成本）
+    ok, msg = r_liquidation_shift()
+    checks["liquidation"] = msg
     if ok:
         reasons.append(msg)
         big_event = True
