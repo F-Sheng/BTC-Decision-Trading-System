@@ -348,15 +348,30 @@ def cycle(client: OkxClient, cfg: dict, st: journal.BotState, cache: dict,
             _opp_side = "short" if sig.side == "long" else "long"
             if st.get_pos(_opp_side).is_open:
                 _op = st.get_pos(_opp_side)
-                if sig.confidence >= cfg["min_confidence"] + 0.17 and sig.size_mult >= 0.25:
-                    LOG.warning("   反向信号 conf=%.2f 足够强，平掉 %s 持仓给新方向让路",
-                                sig.confidence, _opp_side)
+                # 2026-10-27 修复：原逻辑只看信号自身置信度，导致「逆势」信号
+                # （如 21:47 那个 conf=0.70 的逆势做多）能推翻与系统方向一致的仓位。
+                # 现在要求：① 非逆势 ② 信号方向必须等于系统主方向
+                _sys_dir = getattr(sc, "direction", None)
+                _ok_reverse = (
+                    sig.confidence >= cfg["min_confidence"] + 0.17
+                    and sig.size_mult >= 0.25
+                    and not getattr(sig, "counter_trend", False)
+                    and (not _sys_dir or sig.side == _sys_dir)
+                )
+                if _ok_reverse:
+                    LOG.warning("   反向信号 conf=%.2f 且与系统方向(%s)一致，平掉 %s 持仓",
+                                sig.confidence, _sys_dir, _opp_side)
                     executor.close_position(client, st, inst, lot, LOG,
                                             "reverse_signal", price, cfg["ct_val"],
                                             pos=_op, cfg=cfg)
                     journal.save_state(st)
                 else:
-                    LOG.info("   相反方向仍持仓（%s），本信号不推翻它，可并行开仓", _opp_side)
+                    _why = ("逆势信号" if getattr(sig, "counter_trend", False)
+                            else ("与系统方向 %s 不符" % _sys_dir
+                                  if _sys_dir and sig.side != _sys_dir
+                                  else "置信度不足"))
+                    LOG.info("   相反方向仍持仓（%s），本信号不推翻它（%s），可并行开仓",
+                             _opp_side, _why)
 
             if st.get_pos(sig.side).is_open:
                 LOG.info("   本方向已有持仓（%s），不重复开仓", sig.side)
